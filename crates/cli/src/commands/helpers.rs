@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use pump_agent_core::{BacktestReport, EventEnvelope, ExecutionReport, PumpEvent};
 
-use crate::config::{lamports_i128_to_sol, lamports_to_sol, lamports_u128_to_sol};
+use crate::config::lamports_to_sol;
 
 pub const SCHEMA_SQL: &str = include_str!("../../../../schema/postgres.sql");
 
@@ -55,7 +55,6 @@ pub fn render_live_dashboard(
     broker: &pump_agent_core::BrokerSnapshot,
     market_state: &pump_agent_core::MarketState,
     recent_activity: &VecDeque<String>,
-    top_mints_limit: usize,
     position_limit: usize,
 ) {
     print!("\x1b[2J\x1b[H");
@@ -96,32 +95,6 @@ pub fn render_live_dashboard(
                 position.average_entry_price_lamports_per_token,
                 mark_price,
                 pnl_bps
-            );
-        }
-    }
-    println!();
-
-    println!("Hot Mints");
-    let mut hot_mints = market_state.mints().values().collect::<Vec<_>>();
-    hot_mints.sort_by(|left, right| {
-        right
-            .last_trade_slot
-            .cmp(&left.last_trade_slot)
-            .then_with(|| right.buy_volume_lamports.cmp(&left.buy_volume_lamports))
-    });
-    if hot_mints.is_empty() {
-        println!("  none");
-    } else {
-        for mint in hot_mints.into_iter().take(top_mints_limit) {
-            println!(
-                "  {} buys={} sells={} buy_sol={:.3} net_flow={:.3} last_slot={} complete={}",
-                mint_label(&mint.mint, market_state),
-                mint.buy_count,
-                mint.sell_count,
-                lamports_u128_to_sol(mint.buy_volume_lamports),
-                lamports_i128_to_sol(mint.net_flow_lamports),
-                mint.last_trade_slot.unwrap_or_default(),
-                mint.is_complete
             );
         }
     }

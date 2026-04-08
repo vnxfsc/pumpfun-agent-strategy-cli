@@ -608,6 +608,9 @@ pub struct LivePaperArgs {
     #[arg(long, default_value_t = false)]
     pub save_run: bool,
 
+    #[arg(long)]
+    pub execution_jsonl: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     pub persist_events: bool,
 
@@ -616,9 +619,6 @@ pub struct LivePaperArgs {
 
     #[arg(long, default_value_t = 100)]
     pub summary_every_events: u64,
-
-    #[arg(long, default_value_t = 5)]
-    pub dashboard_top_mints: usize,
 
     #[arg(long, default_value_t = 5)]
     pub dashboard_position_limit: usize,

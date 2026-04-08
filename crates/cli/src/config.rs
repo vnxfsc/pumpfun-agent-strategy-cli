@@ -87,10 +87,6 @@ pub fn lamports_str_to_sol(lamports: &str) -> Result<f64> {
     Ok(parsed / 1_000_000_000.0)
 }
 
-pub fn lamports_u128_to_sol(lamports: u128) -> f64 {
-    lamports as f64 / 1_000_000_000.0
-}
-
 pub fn lamports_i128_to_sol(lamports: i128) -> f64 {
     lamports as f64 / 1_000_000_000.0
 }

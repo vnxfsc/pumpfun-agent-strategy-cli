@@ -84,6 +84,7 @@ cargo run -p pump-agent-cli -- compare-runs --left-id 1 --right-id 2
 ```bash
 cargo run -p pump-agent-cli -- live-paper \
   --strategy-config ./strategies/examples/early-flow.toml \
+  --execution-jsonl ./runs/live-executions.jsonl \
   --save-run
 ```
 
@@ -239,6 +240,7 @@ Examples:
 - `live-paper` also defaults to `from_slot=None`
 - use `--resume-from-db` only if you explicitly want provider-side replay
 - `live-paper` does not persist events by default
+- `live-paper` can append strategy executions in real time with `--execution-jsonl <path>`
 - use `--persist-events` only when you intentionally want live events written into PostgreSQL
 - on providers with weak replay support, treating resume as optional is the intended behavior
 

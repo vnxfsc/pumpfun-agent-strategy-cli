@@ -64,6 +64,8 @@ If the task is about generating a new config or Rust strategy skeleton:
 - This repo is for analysis, replay, simulation, and cloning support.
 - It does not submit real transactions.
 - Provider-side replay resume is optional and should not be treated as guaranteed.
+- `live-paper` can write strategy executions incrementally with `--execution-jsonl <path>`.
+- `live-paper --save-run` is useful for run inspection, but it saves on shutdown rather than on every fill.
 - The exported wallet mint shards are often more informative than family-fit heuristics.
 - Built-in strategy families are useful approximations, not complete truth.
 

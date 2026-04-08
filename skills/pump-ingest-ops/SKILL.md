@@ -19,6 +19,8 @@ Use this skill when the task is about:
 - Yellowstone client logic lives in `crates/core/src/grpc.rs`
 - PostgreSQL schema lives in `schema/postgres.sql`
 - Runtime defaults and env resolution live in `crates/cli/src/commands/stream/config.rs`
+- `live-paper` can append strategy executions in real time with `--execution-jsonl <path>`
+- `live-paper --save-run` still persists the summarized run on shutdown, not per fill
 
 ## Ground Rules
 
@@ -68,6 +70,7 @@ cargo run -p pump-agent-cli -- ingest --resume-from-db
 - `ingest` connects and keeps printing decoded events
 - `stats` shows event counts increasing
 - `tail` shows recent trades and mints
+- `live-paper --execution-jsonl <path>` keeps appending filled or rejected strategy executions
 - reconnect does not get stuck in replay-position loops
 
 ## Validation

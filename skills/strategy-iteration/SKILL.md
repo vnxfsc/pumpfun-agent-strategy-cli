@@ -61,6 +61,7 @@ Live-paper:
 ```bash
 cargo run -p pump-agent-cli -- live-paper \
   --strategy-config ./strategies/examples/early-flow.toml \
+  --execution-jsonl ./runs/live-executions.jsonl \
   --save-run
 ```
 
@@ -69,6 +70,7 @@ cargo run -p pump-agent-cli -- live-paper \
 - Do not over-trust one run.
 - Prefer comparing multiple runs plus clone metrics.
 - Treat `live-paper` as validation, not discovery.
+- If you need live execution traces during validation, prefer `--execution-jsonl` over waiting for `--save-run` shutdown persistence.
 - If a wallet looks structurally different from built-in families, create a new variant instead of over-bending one config.
 
 ## Files To Touch
