@@ -43,6 +43,7 @@ cargo run -p pump-agent-cli -- clone-scaffold \
 - Prefer scaffold commands over manual registration edits.
 - Generated Rust modules live in `crates/core/src/strategy/`.
 - Generated configs live in `strategies/`.
+- Shared strategy wiring lives in `crates/app/src/strategy.rs`.
 - If the scaffold was only a test artifact, remove both:
   - the generated Rust module
   - the generated config
@@ -52,12 +53,16 @@ cargo run -p pump-agent-cli -- clone-scaffold \
 
 - `momentum`
 - `early_flow`
+- `breakout`
+- `liquidity_follow`
 - `noop`
 
 Use:
 
 - `early_flow` when the target looks like fresh-mint flow with strong early activity
 - `momentum` when the target looks like broader event-driven follow-through
+- `breakout` when the target looks like delayed confirmation and post-threshold entry
+- `liquidity_follow` when the target looks like flow that keys off increasing participation and depth
 - `noop` only for plumbing or baseline tests
 
 ## After Scaffolding

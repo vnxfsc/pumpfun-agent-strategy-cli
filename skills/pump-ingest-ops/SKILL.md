@@ -16,6 +16,8 @@ Use this skill when the task is about:
 ## Repo Facts
 
 - CLI entrypoints live in `crates/cli/src/commands/stream/`
+- HTTP task entrypoints live in `crates/server/src/http.rs`
+- task orchestration lives in `crates/app/src/usecases/tasks.rs`
 - Yellowstone client logic lives in `crates/core/src/grpc.rs`
 - PostgreSQL schema lives in `schema/postgres.sql`
 - Runtime defaults and env resolution live in `crates/cli/src/commands/stream/config.rs`
@@ -57,6 +59,12 @@ Run ingest with explicit replay attempt:
 cargo run -p pump-agent-cli -- ingest --resume-from-db
 ```
 
+Run the HTTP server if an agent needs task-based control:
+
+```bash
+cargo run -p pump-agent-server -- --port 3001
+```
+
 ## Debug Order
 
 1. Confirm env or CLI args are present.
@@ -71,6 +79,7 @@ cargo run -p pump-agent-cli -- ingest --resume-from-db
 - `stats` shows event counts increasing
 - `tail` shows recent trades and mints
 - `live-paper --execution-jsonl <path>` keeps appending filled or rejected strategy executions
+- `GET /v1/tasks/{task_id}` shows stable task state transitions
 - reconnect does not get stuck in replay-position loops
 
 ## Validation

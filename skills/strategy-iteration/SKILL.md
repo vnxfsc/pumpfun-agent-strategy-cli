@@ -23,6 +23,11 @@ Use this skill when the task is about:
 5. If cloning a wallet, run `clone-eval` or `clone-rank`.
 6. Only then move to `live-paper`.
 
+Prefer structured outputs for automation:
+
+- CLI `--format json`
+- HTTP API from `pump-agent-server`
+
 ## Main Commands
 
 Replay:
@@ -77,7 +82,9 @@ cargo run -p pump-agent-cli -- live-paper \
 
 - Configs: `strategies/*.toml`
 - Strategy code: `crates/core/src/strategy/`
-- Strategy construction: `crates/cli/src/runtime/strategy.rs`
+- Shared strategy construction: `crates/app/src/strategy.rs`
+- CLI argument and presentation layer: `crates/cli/src/`
+- HTTP surface: `crates/server/src/`
 
 ## Validation
 
