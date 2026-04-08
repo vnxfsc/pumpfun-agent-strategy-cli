@@ -1,4 +1,6 @@
+mod breakout;
 mod early_flow;
+mod liquidity_follow;
 mod momentum;
 mod noop;
 // strategy-scaffold: mod
@@ -11,12 +13,14 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
+pub use breakout::{BreakoutStrategy, BreakoutStrategyConfig};
 pub use early_flow::{EarlyFlowStrategy, EarlyFlowStrategyConfig};
+pub use liquidity_follow::{LiquidityFollowStrategy, LiquidityFollowStrategyConfig};
 pub use momentum::{MomentumStrategy, MomentumStrategyConfig};
 pub use noop::NoopStrategy;
 // strategy-scaffold: pub-use
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StrategyMetadata {
     pub name: &'static str,
 }
@@ -46,6 +50,8 @@ pub enum StrategyKind {
     #[default]
     Momentum,
     EarlyFlow,
+    Breakout,
+    LiquidityFollow,
     Noop,
     // strategy-scaffold: kind-variant
 }
@@ -55,6 +61,8 @@ impl StrategyKind {
         match self {
             Self::Momentum => "momentum",
             Self::EarlyFlow => "early_flow",
+            Self::Breakout => "breakout",
+            Self::LiquidityFollow => "liquidity_follow",
             Self::Noop => "noop",
             // strategy-scaffold: kind-as-str
         }
@@ -74,6 +82,8 @@ impl FromStr for StrategyKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "momentum" => Ok(Self::Momentum),
             "early_flow" | "early-flow" | "flow" => Ok(Self::EarlyFlow),
+            "breakout" => Ok(Self::Breakout),
+            "liquidity_follow" | "liquidity-follow" | "liquidity" => Ok(Self::LiquidityFollow),
             "noop" => Ok(Self::Noop),
             // strategy-scaffold: kind-from-str
             other => Err(format!(
@@ -88,6 +98,8 @@ impl FromStr for StrategyKind {
 pub enum AnyStrategy {
     Momentum(MomentumStrategy),
     EarlyFlow(EarlyFlowStrategy),
+    Breakout(BreakoutStrategy),
+    LiquidityFollow(LiquidityFollowStrategy),
     Noop(NoopStrategy),
     // strategy-scaffold: any-strategy-variant
 }
@@ -97,6 +109,8 @@ impl Strategy for AnyStrategy {
         match self {
             Self::Momentum(strategy) => strategy.metadata(),
             Self::EarlyFlow(strategy) => strategy.metadata(),
+            Self::Breakout(strategy) => strategy.metadata(),
+            Self::LiquidityFollow(strategy) => strategy.metadata(),
             Self::Noop(strategy) => strategy.metadata(),
             // strategy-scaffold: metadata-arm
         }
@@ -111,6 +125,8 @@ impl Strategy for AnyStrategy {
         match self {
             Self::Momentum(strategy) => strategy.on_event(event, market_state, broker),
             Self::EarlyFlow(strategy) => strategy.on_event(event, market_state, broker),
+            Self::Breakout(strategy) => strategy.on_event(event, market_state, broker),
+            Self::LiquidityFollow(strategy) => strategy.on_event(event, market_state, broker),
             Self::Noop(strategy) => strategy.on_event(event, market_state, broker),
             // strategy-scaffold: on-event-arm
         }
@@ -127,6 +143,12 @@ impl Strategy for AnyStrategy {
                 strategy.on_execution_reports(reports, market_state, broker)
             }
             Self::EarlyFlow(strategy) => {
+                strategy.on_execution_reports(reports, market_state, broker)
+            }
+            Self::Breakout(strategy) => {
+                strategy.on_execution_reports(reports, market_state, broker)
+            }
+            Self::LiquidityFollow(strategy) => {
                 strategy.on_execution_reports(reports, market_state, broker)
             }
             Self::Noop(strategy) => strategy.on_execution_reports(reports, market_state, broker),
@@ -149,6 +171,14 @@ mod tests {
         assert_eq!(
             StrategyKind::from_str("early_flow").unwrap(),
             StrategyKind::EarlyFlow
+        );
+        assert_eq!(
+            StrategyKind::from_str("breakout").unwrap(),
+            StrategyKind::Breakout
+        );
+        assert_eq!(
+            StrategyKind::from_str("liquidity_follow").unwrap(),
+            StrategyKind::LiquidityFollow
         );
         assert_eq!(StrategyKind::from_str("noop").unwrap(), StrategyKind::Noop);
     }

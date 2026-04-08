@@ -2,7 +2,8 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use pump_agent_core::{
-    AnyStrategy, BrokerConfig, EarlyFlowStrategy, EarlyFlowStrategyConfig, Engine, EventEnvelope,
+    AnyStrategy, BreakoutStrategy, BreakoutStrategyConfig, BrokerConfig, EarlyFlowStrategy,
+    EarlyFlowStrategyConfig, LiquidityFollowStrategy, LiquidityFollowStrategyConfig,
     MomentumStrategy, MomentumStrategyConfig, NoopStrategy, PaperBroker, StrategyKind,
 };
 
@@ -11,14 +12,19 @@ use crate::{
     config::sol_to_lamports,
 };
 
+#[cfg(test)]
+use pump_agent_core::{Engine, EventEnvelope};
+#[cfg(test)]
 use super::persist::build_position_snapshot_input;
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct StrategyExecution {
     pub result: pump_agent_core::BacktestRunResult,
     pub final_position_snapshot: pump_agent_core::PositionSnapshotInput,
 }
 
+#[cfg(test)]
 pub fn run_strategy(events: Vec<EventEnvelope>, args: &StrategyArgs) -> Result<StrategyExecution> {
     let resolved = resolve_strategy_args(args)?;
     let (strategy, broker) = build_strategy_and_broker(&resolved)?;
@@ -77,6 +83,40 @@ pub fn build_strategy_and_broker(args: &StrategyArgs) -> Result<(AnyStrategy, Pa
                 exit_on_sell_count: args.exit_on_sell_count,
             }))
         }
+        StrategyKind::Breakout => {
+            AnyStrategy::Breakout(BreakoutStrategy::new(BreakoutStrategyConfig {
+                max_age_secs: args.max_age_secs,
+                min_buy_count: args.min_buy_count,
+                min_unique_buyers: args.min_unique_buyers,
+                min_total_buy_lamports: sol_to_lamports(args.min_total_buy_sol) as u128,
+                min_net_flow_lamports: sol_to_lamports(args.min_net_buy_sol) as i128,
+                max_sell_count: args.max_sell_count,
+                min_buy_sell_ratio: args.min_buy_sell_ratio,
+                buy_lamports: sol_to_lamports(args.buy_sol),
+                take_profit_bps: args.take_profit_bps,
+                stop_loss_bps: args.stop_loss_bps,
+                max_hold_secs: args.max_hold_secs,
+                max_concurrent_positions: args.max_concurrent_positions,
+                exit_on_sell_count: args.exit_on_sell_count,
+            }))
+        }
+        StrategyKind::LiquidityFollow => AnyStrategy::LiquidityFollow(
+            LiquidityFollowStrategy::new(LiquidityFollowStrategyConfig {
+                max_age_secs: args.max_age_secs,
+                min_buy_count: args.min_buy_count,
+                min_unique_buyers: args.min_unique_buyers,
+                min_total_buy_lamports: sol_to_lamports(args.min_total_buy_sol) as u128,
+                min_net_flow_lamports: sol_to_lamports(args.min_net_buy_sol) as i128,
+                max_sell_count: args.max_sell_count,
+                min_buy_sell_ratio: args.min_buy_sell_ratio,
+                buy_lamports: sol_to_lamports(args.buy_sol),
+                take_profit_bps: args.take_profit_bps,
+                stop_loss_bps: args.stop_loss_bps,
+                max_hold_secs: args.max_hold_secs,
+                max_concurrent_positions: args.max_concurrent_positions,
+                exit_on_sell_count: args.exit_on_sell_count,
+            }),
+        ),
         StrategyKind::Noop => AnyStrategy::Noop(NoopStrategy::new()),
         // strategy-scaffold: runtime-match
     };

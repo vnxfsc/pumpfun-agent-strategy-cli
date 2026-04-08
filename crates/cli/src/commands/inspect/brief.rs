@@ -1,45 +1,45 @@
-use anyhow::Result;
+use pump_agent_app::usecases::{
+    CloneAnalysisRequest, DatabaseRequest,
+    analyze_clone_candidates as analyze_clone_candidates_usecase,
+};
 use pump_agent_core::PgEventStore;
 use serde::Serialize;
+use std::time::Instant;
 
 use crate::{
-    args::AddressBriefArgs,
+    args::{AddressBriefArgs, OutputFormat},
     config::required_config,
-    runtime::{
-        default_strategy_args_for_family, extract_wallet_behavior, score_strategy_execution,
-    },
+    output::{CommandResult, emit_json_success, wants_json},
 };
 
 use super::export::{export_address_events, print_export_summary};
 use crate::commands::helpers::SCHEMA_SQL;
 
-pub async fn address_brief(args: AddressBriefArgs) -> Result<()> {
+pub async fn address_brief(args: AddressBriefArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let events = store.load_replay_events().await?;
-    let wallet = extract_wallet_behavior(&args.address, &events);
-
-    let early_flow_args = default_strategy_args_for_family("early_flow")?;
-    let momentum_args = default_strategy_args_for_family("momentum")?;
-    let early_flow_execution = crate::runtime::run_strategy(events.clone(), &early_flow_args)?;
-    let momentum_execution = crate::runtime::run_strategy(events, &momentum_args)?;
-    let early_flow_fit = score_strategy_execution(&wallet, &early_flow_args, &early_flow_execution);
-    let momentum_fit = score_strategy_execution(&wallet, &momentum_args, &momentum_execution);
-
-    let (best_family, runner_up) = if early_flow_fit.score.overall >= momentum_fit.score.overall {
-        (early_flow_fit, momentum_fit)
-    } else {
-        (momentum_fit, early_flow_fit)
-    };
+    let analysis = analyze_clone_candidates_usecase(CloneAnalysisRequest {
+        database: DatabaseRequest {
+            database_url: database_url.clone(),
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address.clone(),
+    })
+    .await?;
+    let wallet = analysis.wallet;
+    let best_family = analysis.best_family;
+    let runner_up = analysis.runner_up;
 
     let export_summary = if args.export {
+        let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
+        store.apply_schema(SCHEMA_SQL).await?;
         Some(export_address_events(&store, &args.address, &args.export_root).await?)
     } else {
         None
     };
 
-    if args.json {
+    if wants_json(format, args.json) {
         let output = AddressBriefJsonOutput {
             address: wallet.address.clone(),
             shape: ShapeSummary {
@@ -98,7 +98,7 @@ pub async fn address_brief(args: AddressBriefArgs) -> Result<()> {
                 None
             },
         };
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        emit_json_success("address_brief", &output, started)?;
     } else {
         println!("address            : {}", wallet.address);
         println!(
@@ -151,6 +151,15 @@ pub async fn address_brief(args: AddressBriefArgs) -> Result<()> {
             best_family.score.f1,
             best_family.score.precision,
             best_family.score.recall
+        );
+        println!(
+            "best breakdown     : entry={:.3} hold={:.3} size={:.3} token={:.3} exit={:.3} count={:.3}",
+            best_family.score.breakdown.entry_timing_similarity,
+            best_family.score.breakdown.hold_time_similarity,
+            best_family.score.breakdown.size_profile_similarity,
+            best_family.score.breakdown.token_selection_similarity,
+            best_family.score.breakdown.exit_behavior_similarity,
+            best_family.score.breakdown.count_alignment,
         );
         println!(
             "runner up          : {} clone_score={:.4}",
@@ -221,16 +230,20 @@ struct FamilySummary {
     f1: f64,
     precision: f64,
     recall: f64,
+    breakdown: pump_agent_app::api::CloneScoreBreakdownOutput,
 }
 
 impl FamilySummary {
-    fn from_candidate(candidate: &crate::runtime::StrategyCloneCandidate) -> Self {
+    fn from_candidate(candidate: &pump_agent_app::clone::StrategyCloneCandidate) -> Self {
         Self {
             family: candidate.args.strategy.clone(),
             clone_score: candidate.score.overall,
             f1: candidate.score.f1,
             precision: candidate.score.precision,
             recall: candidate.score.recall,
+            breakdown: pump_agent_app::api::clone_score_breakdown_output(
+                &candidate.score.breakdown,
+            ),
         }
     }
 }

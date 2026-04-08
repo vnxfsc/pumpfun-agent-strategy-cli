@@ -5,7 +5,7 @@ use crate::{
     strategy::{Strategy, StrategyMetadata},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BacktestReport {
     pub strategy: StrategyMetadata,
     pub processed_events: u64,

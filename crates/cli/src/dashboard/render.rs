@@ -1,3 +1,4 @@
+use pump_agent_app::api::{CompareRunsOutput, WalletDossierOutput};
 use pump_agent_core::{RunInspectReport, StrategyRunRow, SweepBatchInspectReport};
 
 use crate::config::lamports_str_to_sol;
@@ -8,6 +9,10 @@ pub fn render_dashboard_home(runs: &[StrategyRunRow], limit: i64) -> String {
         "<div class=\"page-head\"><div><p class=\"eyebrow\">Pump Agent</p><h1>Run Dashboard</h1><p class=\"muted\">Recent strategy runs and live-paper sessions from PostgreSQL.</p></div><div class=\"pill\">limit {}</div></div>",
         limit
     ));
+    body.push_str("<div class=\"grid two\">");
+    body.push_str("<div class=\"card\"><h2>Compare Strategies</h2><p class=\"muted\">Inspect field-level strategy differences and run-performance deltas.</p><form class=\"inline-form\" action=\"/compare\" method=\"get\"><label>Left run<input type=\"number\" name=\"left_id\" placeholder=\"101\" required></label><label>Right run<input type=\"number\" name=\"right_id\" placeholder=\"202\" required></label><label>Fills<input type=\"number\" name=\"fill_limit\" value=\"20\" min=\"0\" max=\"500\"></label><button class=\"button\" type=\"submit\">Compare</button></form></div>");
+    body.push_str("<div class=\"card\"><h2>Wallet Research</h2><p class=\"muted\">Open a wallet dossier to compare a wallet's behavior against the built-in strategy families.</p><form class=\"inline-form\" action=\"/wallet\" method=\"get\"><label>Address<input type=\"text\" name=\"address\" placeholder=\"wallet address\" required></label><label>Top mints<input type=\"number\" name=\"top_mints_limit\" value=\"10\" min=\"1\" max=\"100\"></label><label>Samples<input type=\"number\" name=\"sample_limit\" value=\"5\" min=\"1\" max=\"20\"></label><button class=\"button\" type=\"submit\">Open dossier</button></form></div>");
+    body.push_str("</div>");
     body.push_str("<div class=\"card\"><table><thead><tr><th>ID</th><th>Mode</th><th>Strategy</th><th>Batch</th><th>Live</th><th>Events</th><th>Fills</th><th>Rejects</th><th>Equity</th><th>Started</th></tr></thead><tbody>");
     for run in runs {
         let batch_link = run
@@ -164,6 +169,150 @@ pub fn render_dashboard_batch_detail(report: SweepBatchInspectReport) -> String 
     render_dashboard_page(&format!("Sweep Batch {}", report.sweep_batch_id), &body)
 }
 
+pub fn render_dashboard_compare(
+    output: Option<CompareRunsOutput>,
+    left_id: Option<i64>,
+    right_id: Option<i64>,
+) -> String {
+    let mut body = String::new();
+    body.push_str("<div class=\"page-head\"><div><p class=\"eyebrow\">Strategy Diff</p><h1>Compare Runs</h1><p class=\"muted\">Field-level strategy deltas and run-performance changes between two saved runs.</p></div><a class=\"button\" href=\"/\">All runs</a></div>");
+    body.push_str(&format!(
+        "<div class=\"card\"><form class=\"inline-form\" action=\"/compare\" method=\"get\"><label>Left run<input type=\"number\" name=\"left_id\" value=\"{}\" placeholder=\"101\" required></label><label>Right run<input type=\"number\" name=\"right_id\" value=\"{}\" placeholder=\"202\" required></label><label>Fills<input type=\"number\" name=\"fill_limit\" value=\"20\" min=\"0\" max=\"500\"></label><button class=\"button\" type=\"submit\">Refresh diff</button></form></div>",
+        left_id.map(|value| value.to_string()).unwrap_or_default(),
+        right_id.map(|value| value.to_string()).unwrap_or_default(),
+    ));
+
+    let Some(output) = output else {
+        body.push_str("<div class=\"card\"><p class=\"muted\">Pick two run IDs to compare strategy configs and performance deltas.</p></div>");
+        return render_dashboard_page("Compare Runs", &body);
+    };
+
+    body.push_str("<div class=\"grid two\">");
+    body.push_str(&metric_card(
+        "Equity Delta",
+        &format!("{:+.6} SOL", output.deltas.equity_sol),
+    ));
+    body.push_str(&metric_card(
+        "Cash Delta",
+        &format!("{:+.6} SOL", output.deltas.cash_sol),
+    ));
+    body.push_str(&metric_card(
+        "Fills Delta",
+        &format!("{:+}", output.deltas.fills),
+    ));
+    body.push_str(&metric_card(
+        "Reject Delta",
+        &format!("{:+}", output.deltas.rejections),
+    ));
+    body.push_str("</div>");
+    body.push_str(&format!(
+        "<div class=\"card\"><h2>Run Pair</h2><p class=\"muted\">Left: <a href=\"/runs/{left}\">#{left}</a> {left_strategy}. Right: <a href=\"/runs/{right}\">#{right}</a> {right_strategy}.</p><p class=\"muted\">Events delta {events:+}, snapshots {left_snap} vs {right_snap}, fills loaded {left_fill} vs {right_fill}.</p></div>",
+        left = output.left_run.id,
+        right = output.right_run.id,
+        left_strategy = html_escape(&output.left_run.strategy_name),
+        right_strategy = html_escape(&output.right_run.strategy_name),
+        events = output.deltas.events,
+        left_snap = output.loaded_position_snapshots.left,
+        right_snap = output.loaded_position_snapshots.right,
+        left_fill = output.loaded_fills.left,
+        right_fill = output.loaded_fills.right,
+    ));
+    body.push_str("<div class=\"card\"><h2>Strategy Diff</h2><table><thead><tr><th>Field</th><th>Left</th><th>Right</th><th>Delta</th></tr></thead><tbody>");
+    for field in output.strategy_diff.changed_fields {
+        body.push_str(&format!(
+            "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+            html_escape(field.field),
+            html_escape(&field.left.to_string()),
+            html_escape(&field.right.to_string()),
+            field
+                .numeric_delta
+                .map(|value| format!("{:+.6}", value))
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+    }
+    body.push_str("</tbody></table></div>");
+    render_dashboard_page("Compare Runs", &body)
+}
+
+pub fn render_dashboard_wallet(
+    dossier: Option<WalletDossierOutput>,
+    address: Option<&str>,
+) -> String {
+    let mut body = String::new();
+    body.push_str("<div class=\"page-head\"><div><p class=\"eyebrow\">Wallet Research</p><h1>Wallet vs Strategy</h1><p class=\"muted\">See how a wallet's observed behavior maps onto the built-in strategy families.</p></div><a class=\"button\" href=\"/\">All runs</a></div>");
+    body.push_str(&format!(
+        "<div class=\"card\"><form class=\"inline-form\" action=\"/wallet\" method=\"get\"><label>Address<input type=\"text\" name=\"address\" value=\"{}\" placeholder=\"wallet address\" required></label><label>Top mints<input type=\"number\" name=\"top_mints_limit\" value=\"10\" min=\"1\" max=\"100\"></label><label>Samples<input type=\"number\" name=\"sample_limit\" value=\"5\" min=\"1\" max=\"20\"></label><button class=\"button\" type=\"submit\">Refresh dossier</button></form></div>",
+        address.map(html_escape).unwrap_or_default(),
+    ));
+
+    let Some(dossier) = dossier else {
+        body.push_str("<div class=\"card\"><p class=\"muted\">Enter a wallet address to load a dossier, family recommendation, and next experiment plan.</p></div>");
+        return render_dashboard_page("Wallet Dossier", &body);
+    };
+
+    body.push_str("<div class=\"grid two\">");
+    body.push_str(&metric_card(
+        "Trades",
+        &dossier.overview.total_trades.to_string(),
+    ));
+    body.push_str(&metric_card(
+        "Distinct Mints",
+        &dossier.overview.distinct_mints.to_string(),
+    ));
+    body.push_str(&metric_card(
+        "Roundtrips",
+        &dossier.wallet_summary.roundtrip_count.to_string(),
+    ));
+    body.push_str(&metric_card(
+        "Recommended Family",
+        &dossier.clone_report.recommended_base_family,
+    ));
+    body.push_str("</div>");
+    body.push_str(&format!(
+        "<div class=\"card\"><h2>Recommendation</h2><p class=\"muted\">{}</p><p><strong>Confidence:</strong> {}. <strong>Runner-up:</strong> {}.</p></div>",
+        html_escape(&dossier.explain_why.decision_summary),
+        html_escape(&dossier.explain_why.confidence),
+        html_escape(&dossier.explain_why.runner_up_family),
+    ));
+    body.push_str("<div class=\"grid two\">");
+    body.push_str("<div class=\"card\"><h2>Top Strengths</h2><ul>");
+    for line in dossier.explain_why.strengths.iter().take(4) {
+        body.push_str(&format!("<li>{}</li>", html_escape(line)));
+    }
+    body.push_str("</ul></div>");
+    body.push_str("<div class=\"card\"><h2>Warnings</h2><ul>");
+    for line in dossier.explain_why.warnings.iter().take(4) {
+        body.push_str(&format!("<li>{}</li>", html_escape(line)));
+    }
+    body.push_str("</ul></div>");
+    body.push_str("</div>");
+    body.push_str("<div class=\"grid two\">");
+    body.push_str("<div class=\"card\"><h2>Top Mints</h2><table><thead><tr><th>Mint</th><th>Trades</th><th>Buys</th><th>Sells</th></tr></thead><tbody>");
+    for mint in dossier.top_mints.iter().take(8) {
+        body.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            html_escape(&mint.mint),
+            mint.trade_count,
+            mint.buy_count,
+            mint.sell_count,
+        ));
+    }
+    body.push_str("</tbody></table></div>");
+    body.push_str("<div class=\"card\"><h2>Next Experiments</h2><table><thead><tr><th>Priority</th><th>Title</th><th>Family</th><th>Objective</th></tr></thead><tbody>");
+    for proposal in dossier.suggest_next_experiment.proposals.iter().take(5) {
+        body.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            html_escape(&proposal.priority),
+            html_escape(&proposal.title),
+            html_escape(&proposal.family),
+            html_escape(&proposal.objective),
+        ));
+    }
+    body.push_str("</tbody></table></div>");
+    body.push_str("</div>");
+    render_dashboard_page("Wallet Dossier", &body)
+}
+
 pub fn render_dashboard_error(title: &str, message: &str) -> String {
     render_dashboard_page(
         title,
@@ -252,6 +401,15 @@ fn dashboard_css() -> &'static str {
     .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .metric-label { margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; }
     .metric-value { margin: 0; font-size: 28px; color: var(--accent); }
+    .inline-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+    .inline-form label { display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .inline-form input {
+      border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
+      background: rgba(255,255,255,0.7); color: var(--ink); font: inherit;
+    }
+    ul { margin: 0; padding-left: 18px; }
+    li { margin-bottom: 8px; }
+    code { font-family: "SFMono-Regular", "Menlo", monospace; font-size: 12px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid rgba(212, 196, 174, 0.7); vertical-align: top; }
     th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; }
@@ -284,14 +442,23 @@ fn html_escape(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use pump_agent_app::api::{
+        CloneReportOutput, CloneScoreBreakdownOutput, CompareRunsDeltasOutput, CompareRunsOutput,
+        ExperimentProposalOutput, ExplainWhyOutput, FitSummary, LoadedCountOutput, ParamsSeed,
+        StrategyDiffOutput, StrategyFieldDiffOutput, SuggestNextExperimentOutput,
+        WalletDossierOutput,
+    };
+    use pump_agent_app::strategy::{StrategyConfig, SweepConfig};
     use pump_agent_core::{
-        PositionSnapshotRow, RunFillRow, RunInspectReport, StrategyRunDetail, StrategyRunRow,
-        SweepBatchInspectReport, SweepBatchRunRow,
+        AddressMintSummary, AddressOverview, AddressRoundtrip, PositionSnapshotRow, RunFillRow,
+        RunInspectReport, StrategyRunDetail, StrategyRunRow, SweepBatchInspectReport,
+        SweepBatchRunRow,
     };
 
     use super::{
-        html_escape, render_dashboard_batch_detail, render_dashboard_error, render_dashboard_home,
-        render_dashboard_run_detail,
+        html_escape, render_dashboard_batch_detail, render_dashboard_compare,
+        render_dashboard_error, render_dashboard_home, render_dashboard_run_detail,
+        render_dashboard_wallet,
     };
 
     #[test]
@@ -419,5 +586,281 @@ mod tests {
         assert!(html.contains("Oops"));
         assert!(html.contains("&lt;broken&gt;"));
         assert!(!html.contains("<broken>"));
+    }
+
+    #[test]
+    fn compare_render_shows_strategy_diff_rows() {
+        let output = CompareRunsOutput {
+            left_run: StrategyRunDetail {
+                id: 1,
+                strategy_name: "early_flow".to_string(),
+                run_mode: "backtest".to_string(),
+                sweep_batch_id: None,
+                live_run_id: None,
+                config: serde_json::json!({"strategy":"early_flow"}),
+                source_type: "postgres".to_string(),
+                source_ref: "pump_event_envelopes".to_string(),
+                started_at: "2026-04-08T12:00:00Z".to_string(),
+                finished_at: None,
+                processed_events: 100,
+                fills: 4,
+                rejections: 0,
+                ending_cash_lamports: "1000000000".to_string(),
+                ending_equity_lamports: "1100000000".to_string(),
+            },
+            right_run: StrategyRunDetail {
+                id: 2,
+                strategy_name: "breakout".to_string(),
+                run_mode: "backtest".to_string(),
+                sweep_batch_id: None,
+                live_run_id: None,
+                config: serde_json::json!({"strategy":"breakout"}),
+                source_type: "postgres".to_string(),
+                source_ref: "pump_event_envelopes".to_string(),
+                started_at: "2026-04-08T12:10:00Z".to_string(),
+                finished_at: None,
+                processed_events: 120,
+                fills: 5,
+                rejections: 1,
+                ending_cash_lamports: "1200000000".to_string(),
+                ending_equity_lamports: "1300000000".to_string(),
+            },
+            left_strategy: sample_strategy("early_flow"),
+            right_strategy: sample_strategy("breakout"),
+            loaded_fills: LoadedCountOutput { left: 4, right: 5 },
+            loaded_position_snapshots: LoadedCountOutput { left: 1, right: 1 },
+            deltas: CompareRunsDeltasOutput {
+                events: 20,
+                fills: 1,
+                rejections: 1,
+                cash_sol: 0.2,
+                equity_sol: 0.2,
+            },
+            strategy_diff: StrategyDiffOutput {
+                family_changed: true,
+                changed_field_count: 2,
+                changed_fields: vec![
+                    StrategyFieldDiffOutput {
+                        field: "strategy",
+                        left: serde_json::json!("early_flow"),
+                        right: serde_json::json!("breakout"),
+                        numeric_delta: None,
+                    },
+                    StrategyFieldDiffOutput {
+                        field: "buy_sol",
+                        left: serde_json::json!(0.15),
+                        right: serde_json::json!(0.18),
+                        numeric_delta: Some(0.03),
+                    },
+                ],
+            },
+        };
+
+        let html = render_dashboard_compare(Some(output), Some(1), Some(2));
+        assert!(html.contains("Compare Runs"));
+        assert!(html.contains("buy_sol"));
+        assert!(html.contains("/runs/1"));
+        assert!(html.contains("/runs/2"));
+    }
+
+    #[test]
+    fn wallet_render_shows_recommendation_and_experiments() {
+        let dossier = WalletDossierOutput {
+            address: "Wallet111".to_string(),
+            experiment_id: None,
+            overview: AddressOverview {
+                address: "Wallet111".to_string(),
+                total_trades: 12,
+                buy_count: 7,
+                sell_count: 5,
+                distinct_mints: 3,
+                first_trade_seq: Some(1),
+                first_trade_at: Some("2026-04-08T12:00:00Z".to_string()),
+                last_trade_seq: Some(9),
+                last_trade_at: Some("2026-04-08T12:10:00Z".to_string()),
+                gross_buy_lamports: "1000000000".to_string(),
+                gross_sell_lamports: "1200000000".to_string(),
+                net_cash_flow_lamports: "200000000".to_string(),
+                roundtrip_count: 4,
+                closed_roundtrip_count: 3,
+                open_roundtrip_count: 1,
+                orphan_sell_count: 0,
+                realized_pnl_lamports: "150000000".to_string(),
+                win_rate_closed: Some(0.66),
+                avg_hold_secs_closed: Some(42),
+            },
+            top_mints: vec![AddressMintSummary {
+                mint: "Mint111".to_string(),
+                trade_count: 4,
+                buy_count: 3,
+                sell_count: 1,
+                gross_buy_lamports: "1000".to_string(),
+                gross_sell_lamports: "1200".to_string(),
+                net_cash_flow_lamports: "200".to_string(),
+                first_seq: 1,
+                last_seq: 4,
+                last_trade_at: Some("2026-04-08T12:05:00Z".to_string()),
+            }],
+            recent_roundtrips: vec![AddressRoundtrip {
+                mint: "Mint111".to_string(),
+                status: "closed".to_string(),
+                opened_seq: 1,
+                opened_slot: 1,
+                opened_at: Some("2026-04-08T12:00:00Z".to_string()),
+                closed_seq: Some(4),
+                closed_slot: Some(4),
+                closed_at: Some("2026-04-08T12:05:00Z".to_string()),
+                hold_secs: Some(300),
+                entry_count: 1,
+                exit_count: 1,
+                bought_token_amount: "5000".to_string(),
+                sold_token_amount: "5000".to_string(),
+                gross_buy_lamports: "1000".to_string(),
+                gross_sell_lamports: "1200".to_string(),
+                total_fees_lamports: "10".to_string(),
+                total_cashback_lamports: "0".to_string(),
+                net_entry_lamports: "1000".to_string(),
+                net_exit_lamports: "1200".to_string(),
+                realized_pnl_lamports: Some("200".to_string()),
+                roi_bps: Some(2000),
+            }],
+            wallet_summary: sample_wallet_summary(),
+            sample_entries: vec![],
+            sample_roundtrips: vec![],
+            clone_report: CloneReportOutput {
+                address: "Wallet111".to_string(),
+                recommended_base_family: "breakout".to_string(),
+                recommended_next_strategy_name: "breakout_plus".to_string(),
+                base_fit: sample_fit("breakout", 0.71),
+                runner_up: sample_fit("momentum", 0.61),
+                confirmed_rules: vec!["fast confirmation".to_string()],
+                tentative_rules: vec!["sell pressure tolerance".to_string()],
+                anti_patterns: vec!["not a sniper".to_string()],
+                recommended_params_seed: sample_seed(),
+                export: None,
+            },
+            explain_why: ExplainWhyOutput {
+                address: "Wallet111".to_string(),
+                recommended_family: "breakout".to_string(),
+                runner_up_family: "momentum".to_string(),
+                confidence: "moderate".to_string(),
+                decision_summary: "breakout is ahead because entry timing fits better".to_string(),
+                family_gap: 0.1,
+                wallet_summary: sample_wallet_summary(),
+                base_clone_score: 0.71,
+                runner_up_clone_score: 0.61,
+                base_breakdown: sample_breakdown(),
+                runner_up_breakdown: sample_breakdown(),
+                strengths: vec!["entry timing is a relative strength".to_string()],
+                weaknesses: vec!["exit behavior is still weak".to_string()],
+                warnings: vec!["sample is still small".to_string()],
+                next_actions: vec!["tune exit_on_sell_count".to_string()],
+            },
+            suggest_next_experiment: SuggestNextExperimentOutput {
+                address: "Wallet111".to_string(),
+                experiment_id: None,
+                recommended_family: "breakout".to_string(),
+                confidence: "moderate".to_string(),
+                history_summary: None,
+                proposals: vec![ExperimentProposalOutput {
+                    priority: "p0".to_string(),
+                    title: "fit breakout".to_string(),
+                    family: "breakout".to_string(),
+                    objective: "tune breakout".to_string(),
+                    rationale: "best family".to_string(),
+                    expected_learning: "learn entry timing".to_string(),
+                    strategy: sample_strategy("breakout"),
+                    sweep: SweepConfig::default(),
+                }],
+                skipped_families: vec![],
+            },
+        };
+
+        let html = render_dashboard_wallet(Some(dossier), Some("Wallet111"));
+        assert!(html.contains("Wallet vs Strategy"));
+        assert!(html.contains("breakout"));
+        assert!(html.contains("fit breakout"));
+    }
+
+    fn sample_strategy(strategy: &str) -> StrategyConfig {
+        StrategyConfig {
+            strategy: strategy.to_string(),
+            strategy_config: None,
+            starting_sol: 10.0,
+            buy_sol: 0.15,
+            max_age_secs: 20,
+            min_buy_count: 4,
+            min_unique_buyers: 4,
+            min_net_buy_sol: 0.3,
+            take_profit_bps: 1800,
+            stop_loss_bps: 900,
+            max_hold_secs: 45,
+            min_total_buy_sol: 0.8,
+            max_sell_count: 1,
+            min_buy_sell_ratio: 4.0,
+            max_concurrent_positions: 3,
+            exit_on_sell_count: 3,
+            trading_fee_bps: 100,
+            slippage_bps: 50,
+        }
+    }
+
+    fn sample_breakdown() -> CloneScoreBreakdownOutput {
+        CloneScoreBreakdownOutput {
+            entry_timing_similarity: 0.7,
+            hold_time_similarity: 0.6,
+            size_profile_similarity: 0.65,
+            token_selection_similarity: 0.55,
+            exit_behavior_similarity: 0.5,
+            count_alignment: 0.75,
+        }
+    }
+
+    fn sample_fit(family: &str, score: f64) -> FitSummary {
+        FitSummary {
+            family: family.to_string(),
+            clone_score: score,
+            f1: score,
+            precision: score,
+            recall: score,
+            breakdown: sample_breakdown(),
+        }
+    }
+
+    fn sample_seed() -> ParamsSeed {
+        ParamsSeed {
+            buy_sol: 0.15,
+            max_age_secs: 20,
+            min_buy_count: 4,
+            min_unique_buyers: 4,
+            min_net_buy_sol: 0.3,
+            min_total_buy_sol: 0.8,
+            max_sell_count: 1,
+            min_buy_sell_ratio: 4.0,
+            max_hold_secs: 45,
+            max_concurrent_positions: 3,
+            exit_on_sell_count: 3,
+            take_profit_bps: 1800,
+            stop_loss_bps: 900,
+        }
+    }
+
+    fn sample_wallet_summary() -> pump_agent_app::clone::WalletBehaviorSummary {
+        pump_agent_app::clone::WalletBehaviorSummary {
+            entry_count: 4,
+            roundtrip_count: 4,
+            closed_roundtrip_count: 3,
+            open_roundtrip_count: 1,
+            orphan_sell_count: 0,
+            avg_entry_age_secs: Some(12.0),
+            avg_entry_buy_count_before: Some(4.0),
+            avg_entry_sell_count_before: Some(1.0),
+            avg_entry_unique_buyers_before: Some(4.0),
+            avg_entry_total_buy_sol_before: Some(1.0),
+            avg_entry_net_flow_sol_before: Some(0.6),
+            avg_entry_buy_sell_ratio_before: Some(4.0),
+            avg_entry_buy_sol: Some(0.15),
+            avg_hold_secs_closed: Some(45.0),
+        }
     }
 }

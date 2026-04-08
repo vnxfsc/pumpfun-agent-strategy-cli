@@ -1,18 +1,14 @@
 [package]
-name = "pump-agent-cli"
+name = "pump-agent-app"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum.workspace = true
-clap.workspace = true
-dotenvy = "0.15.7"
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-pump-agent-app = { path = "../app" }
-pump-agent-core = { path = "../core" }
 tokio.workspace = true
 toml.workspace = true
+pump-agent-core = { path = "../core" }

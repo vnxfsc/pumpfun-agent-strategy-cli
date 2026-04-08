@@ -1,16 +1,8 @@
 use std::{fmt::Display, str::FromStr};
 
 use anyhow::{Result, bail};
-use pump_agent_core::BacktestReport;
 
 use crate::args::{StrategyArgs, SweepDbArgs};
-
-#[derive(Debug, Clone)]
-pub struct SweepRunSummary {
-    pub run_id: i64,
-    pub args: StrategyArgs,
-    pub report: BacktestReport,
-}
 
 pub fn build_sweep_variants(base: &StrategyArgs, sweep: &SweepDbArgs) -> Result<Vec<StrategyArgs>> {
     let mut variants = vec![StrategyArgs {

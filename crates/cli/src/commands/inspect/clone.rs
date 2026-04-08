@@ -1,19 +1,32 @@
-use anyhow::Result;
+use pump_agent_app::{
+    api::{clone_eval_output, clone_rank_output, fit_params_output, infer_strategy_output},
+    clone::{
+        StrategyCloneCandidate, WalletBehaviorSummary, WalletEntryFeature, WalletRoundtrip,
+        extract_wallet_behavior,
+    },
+    strategy::StrategyConfig,
+    usecases::{
+        CloneEvalRequest, CloneRankRequest, DatabaseRequest, FitParamsRequest,
+        InferStrategyRequest, clone_eval as clone_eval_usecase, clone_rank as clone_rank_usecase,
+        fit_params as fit_params_usecase, infer_strategy as infer_strategy_usecase,
+    },
+};
 use pump_agent_core::PgEventStore;
-use serde::Serialize;
+use serde_json::json;
+use std::time::Instant;
 
 use crate::{
-    args::{AddressFeaturesArgs, CloneEvalArgs, CloneRankArgs, FitParamsArgs, InferStrategyArgs},
-    config::required_config,
-    runtime::{
-        build_fit_variants, default_strategy_args_for_family, deserialize_strategy_config,
-        extract_wallet_behavior, resolve_strategy_args, run_clone_fit, score_strategy_execution,
+    args::{
+        AddressFeaturesArgs, CloneEvalArgs, CloneRankArgs, FitParamsArgs, InferStrategyArgs,
+        OutputFormat,
     },
+    config::required_config,
+    output::{CommandError, CommandResult, emit_json_success, wants_json},
 };
 
 use crate::commands::helpers::SCHEMA_SQL;
 
-pub async fn address_features(args: AddressFeaturesArgs) -> Result<()> {
+pub async fn address_features(args: AddressFeaturesArgs) -> anyhow::Result<()> {
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
     let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
     store.apply_schema(SCHEMA_SQL).await?;
@@ -167,43 +180,59 @@ pub async fn address_features(args: AddressFeaturesArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn infer_strategy(args: InferStrategyArgs) -> Result<()> {
+pub async fn address_features_json(
+    args: AddressFeaturesArgs,
+    format: OutputFormat,
+) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
     let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
     store.apply_schema(SCHEMA_SQL).await?;
     let events = store.load_replay_events().await?;
-    let wallet = extract_wallet_behavior(&args.address, &events);
-    let families = args
-        .family
-        .as_deref()
-        .map(|family| vec![family.to_string()])
-        .unwrap_or_else(|| vec!["early_flow".to_string(), "momentum".to_string()]);
+    let report = extract_wallet_behavior(&args.address, &events);
 
-    let mut candidates = Vec::new();
-    for family in families {
-        let strategy_args = default_strategy_args_for_family(&family)?;
-        let execution = crate::runtime::run_strategy(events.clone(), &strategy_args)?;
-        candidates.push(score_strategy_execution(
-            &wallet,
-            &strategy_args,
-            &execution,
-        ));
+    if format.is_json() {
+        let output = AddressFeaturesOutput {
+            address: report.address,
+            summary: report.summary,
+            entries: report.entries.into_iter().take(args.sample_limit).collect(),
+            roundtrips: report
+                .roundtrips
+                .into_iter()
+                .take(args.sample_limit)
+                .collect(),
+        };
+        return emit_json_success("address_features", &output, started);
     }
 
-    candidates.sort_by(|left, right| right.score.overall.total_cmp(&left.score.overall));
+    address_features(args).await.map_err(CommandError::from)
+}
 
-    println!("address: {}", wallet.address);
+pub async fn infer_strategy(args: InferStrategyArgs) -> anyhow::Result<()> {
+    let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
+    let result = infer_strategy_usecase(InferStrategyRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address,
+        family: args.family,
+    })
+    .await?;
+
+    println!("address: {}", result.wallet.address);
     println!(
         "wallet entries={} roundtrips={} closed={} open={} orphan_sells={}",
-        wallet.summary.entry_count,
-        wallet.summary.roundtrip_count,
-        wallet.summary.closed_roundtrip_count,
-        wallet.summary.open_roundtrip_count,
-        wallet.summary.orphan_sell_count
+        result.wallet.summary.entry_count,
+        result.wallet.summary.roundtrip_count,
+        result.wallet.summary.closed_roundtrip_count,
+        result.wallet.summary.open_roundtrip_count,
+        result.wallet.summary.orphan_sell_count
     );
     println!();
 
-    for candidate in candidates {
+    for candidate in result.candidates {
         print_candidate(&candidate);
         println!();
     }
@@ -211,58 +240,66 @@ pub async fn infer_strategy(args: InferStrategyArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn clone_eval(args: CloneEvalArgs) -> Result<()> {
+pub async fn infer_strategy_json(
+    args: InferStrategyArgs,
+    format: OutputFormat,
+) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let events = store.load_replay_events().await?;
-    let wallet = extract_wallet_behavior(&args.address, &events);
-    let (resolved, eval_source) = if let Some(run_id) = args.run_id {
-        let inspect = store.inspect_strategy_run(run_id, 0).await?;
-        let Some(run) = inspect.run else {
-            println!("strategy run not found: {}", run_id);
-            return Ok(());
-        };
-        (
-            deserialize_strategy_config(&run.config)?,
-            format!("run_id={}", run_id),
-        )
-    } else {
-        (
-            resolve_strategy_args(&args.strategy)?,
-            "strategy_args".to_string(),
-        )
-    };
-    let execution = crate::runtime::run_strategy(events, &resolved)?;
-    let candidate = score_strategy_execution(&wallet, &resolved, &execution);
+    let result = infer_strategy_usecase(InferStrategyRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address.clone(),
+        family: args.family.clone(),
+    })
+    .await?;
 
-    let output = CloneEvalOutput {
-        address: wallet.address.clone(),
-        wallet_entries: wallet.summary.entry_count,
-        wallet_roundtrips: wallet.summary.roundtrip_count,
-        wallet_closed_roundtrips: wallet.summary.closed_roundtrip_count,
-        strategy: resolved.strategy.clone(),
-        strategy_name: candidate.report.strategy.name.to_string(),
-        eval_source,
-        clone_score: candidate.score.overall,
-        f1: candidate.score.f1,
-        precision: candidate.score.precision,
-        recall: candidate.score.recall,
-        matched_entries: candidate.score.matched_entries,
-        strategy_entries: candidate.score.strategy_entries,
-        entry_delay_secs: candidate.score.avg_entry_delay_secs,
-        hold_error_secs: candidate.score.avg_hold_error_secs,
-        size_error_ratio: candidate.score.avg_size_error_ratio,
-        count_alignment: candidate.score.count_alignment,
-        fills: candidate.report.fills,
-        rejections: candidate.report.rejections,
-        ending_equity_lamports: candidate.report.ending_equity_lamports,
-        ending_cash_lamports: candidate.report.ending_cash_lamports,
-        resolved_strategy: resolved,
-    };
+    if format.is_json() {
+        let output = infer_strategy_output(result);
+        return emit_json_success("infer_strategy", &output, started);
+    }
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    infer_strategy(args).await.map_err(CommandError::from)
+}
+
+pub async fn clone_eval(args: CloneEvalArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
+    let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
+    let eval = clone_eval_usecase(CloneEvalRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address.clone(),
+        strategy: args
+            .run_id
+            .is_none()
+            .then(|| strategy_config_from_args(&args.strategy)),
+        run_id: args.run_id,
+        experiment: None,
+    })
+    .await?;
+    let Some(eval) = eval else {
+        let run_id = args
+            .run_id
+            .expect("run_id should exist when eval result is missing");
+        return Err(
+            CommandError::not_found(format!("strategy run not found: {}", run_id)).with_details(
+                json!({
+                    "resource": "strategy_run",
+                    "id": run_id,
+                }),
+            ),
+        );
+    };
+    let output = clone_eval_output(eval);
+
+    if wants_json(format, args.json) {
+        emit_json_success("clone_eval", &output, started)?;
     } else {
         println!("address            : {}", output.address);
         println!("strategy           : {}", output.strategy);
@@ -299,6 +336,15 @@ pub async fn clone_eval(args: CloneEvalArgs) -> Result<()> {
                 .unwrap_or_else(|| "n/a".to_string())
         );
         println!(
+            "breakdown          : entry={:.3} hold={:.3} size={:.3} token={:.3} exit={:.3} count={:.3}",
+            output.breakdown.entry_timing_similarity,
+            output.breakdown.hold_time_similarity,
+            output.breakdown.size_profile_similarity,
+            output.breakdown.token_selection_similarity,
+            output.breakdown.exit_behavior_similarity,
+            output.breakdown.count_alignment,
+        );
+        println!(
             "execution          : fills={} rejections={} ending_cash={} ending_equity={}",
             output.fills,
             output.rejections,
@@ -319,36 +365,41 @@ pub async fn clone_eval(args: CloneEvalArgs) -> Result<()> {
             output.resolved_strategy.max_concurrent_positions,
             output.resolved_strategy.exit_on_sell_count,
         );
+        if let Some(evaluation_id) = &output.recorded_evaluation_id {
+            println!("recorded eval      : {}", evaluation_id);
+        }
     }
 
     Ok(())
 }
 
-pub async fn fit_params(args: FitParamsArgs) -> Result<()> {
+pub async fn fit_params(args: FitParamsArgs) -> anyhow::Result<()> {
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let events = store.load_replay_events().await?;
-    let wallet = extract_wallet_behavior(&args.address, &events);
-    let mut base = default_strategy_args_for_family(&args.family)?;
-    base.strategy = args.family.replace('-', "_");
-    base.starting_sol = args.strategy.starting_sol;
-    base.trading_fee_bps = args.strategy.trading_fee_bps;
-    base.slippage_bps = args.strategy.slippage_bps;
-    let variants = build_fit_variants(&base, &args)?;
-    let fit = run_clone_fit(&events, &wallet, variants)?;
+    let sweep = sweep_config_from_fit_args(&args);
+    let result = fit_params_usecase(FitParamsRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address,
+        family: args.family,
+        base_overrides: strategy_config_from_args(&args.strategy),
+        sweep,
+    })
+    .await?;
 
     println!(
         "address={} family={} candidates={} wallet_entries={} wallet_roundtrips={}",
-        wallet.address,
-        args.family,
-        fit.candidates.len(),
-        wallet.summary.entry_count,
-        wallet.summary.roundtrip_count
+        result.wallet.address,
+        result.family,
+        result.fit.candidates.len(),
+        result.wallet.summary.entry_count,
+        result.wallet.summary.roundtrip_count
     );
     println!();
 
-    for candidate in fit.candidates.iter().take(args.top) {
+    for candidate in result.fit.candidates.iter().take(args.top) {
         print_candidate(candidate);
         println!(
             "  params: buy_sol={} max_age_secs={} min_buy_count={} min_unique_buyers={} min_total_buy_sol={} max_sell_count={} ratio={} take_profit_bps={} stop_loss_bps={} concurrent={} exit_on_sell_count={}",
@@ -370,76 +421,53 @@ pub async fn fit_params(args: FitParamsArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn clone_rank(args: CloneRankArgs) -> Result<()> {
+pub async fn fit_params_json(args: FitParamsArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let events = store.load_replay_events().await?;
-    let wallet = extract_wallet_behavior(&args.address, &events);
-    let runs = store.list_strategy_runs(args.scan_limit).await?;
+    let result = fit_params_usecase(FitParamsRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address.clone(),
+        family: args.family.clone(),
+        base_overrides: strategy_config_from_args(&args.strategy),
+        sweep: sweep_config_from_fit_args(&args),
+    })
+    .await?;
 
-    let mut ranked = Vec::new();
-    for run in runs {
-        let inspect = store.inspect_strategy_run(run.id, 0).await?;
-        let Some(detail) = inspect.run else {
-            continue;
-        };
-        let Ok(resolved) = deserialize_strategy_config(&detail.config) else {
-            continue;
-        };
-        let execution = crate::runtime::run_strategy(events.clone(), &resolved)?;
-        let candidate = score_strategy_execution(&wallet, &resolved, &execution);
-        ranked.push(CloneRankRow {
-            run_id: detail.id,
-            strategy: resolved.strategy.clone(),
-            strategy_name: candidate.report.strategy.name.to_string(),
-            run_mode: detail.run_mode,
-            source_type: detail.source_type,
-            source_ref: detail.source_ref,
-            started_at: detail.started_at,
-            stored_equity_lamports: detail.ending_equity_lamports,
-            clone_score: candidate.score.overall,
-            f1: candidate.score.f1,
-            precision: candidate.score.precision,
-            recall: candidate.score.recall,
-            matched_entries: candidate.score.matched_entries,
-            strategy_entries: candidate.score.strategy_entries,
-            entry_delay_secs: candidate.score.avg_entry_delay_secs,
-            hold_error_secs: candidate.score.avg_hold_error_secs,
-            size_error_ratio: candidate.score.avg_size_error_ratio,
-            count_alignment: candidate.score.count_alignment,
-        });
+    if format.is_json() {
+        let output = fit_params_output(result, args.top);
+        return emit_json_success("fit_params", &output, started);
     }
 
-    ranked.sort_by(|left, right| {
-        right
-            .clone_score
-            .total_cmp(&left.clone_score)
-            .then_with(|| right.f1.total_cmp(&left.f1))
-            .then_with(|| right.count_alignment.total_cmp(&left.count_alignment))
-            .then_with(|| right.run_id.cmp(&left.run_id))
-    });
+    fit_params(args).await.map_err(CommandError::from)
+}
 
-    let top = ranked.into_iter().take(args.top).collect::<Vec<_>>();
-    if args.json {
-        let output = CloneRankOutput {
-            address: wallet.address,
-            wallet_entries: wallet.summary.entry_count,
-            wallet_roundtrips: wallet.summary.roundtrip_count,
-            scanned_runs: args.scan_limit,
-            ranked: top,
-        };
-        println!("{}", serde_json::to_string_pretty(&output)?);
+pub async fn clone_rank(args: CloneRankArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
+    let database_url = required_config(args.database_url.clone(), "DATABASE_URL")?;
+    let result = clone_rank_usecase(CloneRankRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address.clone(),
+        scan_limit: args.scan_limit,
+    })
+    .await?;
+    let output = clone_rank_output(result, args.top);
+    if wants_json(format, args.json) {
+        emit_json_success("clone_rank", &output, started)?;
     } else {
         println!(
             "address={} wallet_entries={} wallet_roundtrips={} scanned_runs={}",
-            wallet.address,
-            wallet.summary.entry_count,
-            wallet.summary.roundtrip_count,
-            args.scan_limit
+            output.address, output.wallet_entries, output.wallet_roundtrips, args.scan_limit
         );
         println!();
-        for row in top {
+        for row in output.ranked {
             println!(
                 "run_id={} strategy={} strategy_name={} mode={} source={} clone_score={:.4} f1={:.4} precision={:.4} recall={:.4} matched={}/{} entry_delay={} hold_error={} size_error={} count_alignment={:.4} stored_equity={}",
                 row.run_id,
@@ -471,64 +499,38 @@ pub async fn clone_rank(args: CloneRankArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct CloneEvalOutput {
+fn strategy_config_from_args(args: &crate::args::StrategyArgs) -> StrategyConfig {
+    StrategyConfig {
+        strategy: args.strategy.clone(),
+        strategy_config: args.strategy_config.clone(),
+        starting_sol: args.starting_sol,
+        buy_sol: args.buy_sol,
+        max_age_secs: args.max_age_secs,
+        min_buy_count: args.min_buy_count,
+        min_unique_buyers: args.min_unique_buyers,
+        min_net_buy_sol: args.min_net_buy_sol,
+        take_profit_bps: args.take_profit_bps,
+        stop_loss_bps: args.stop_loss_bps,
+        max_hold_secs: args.max_hold_secs,
+        min_total_buy_sol: args.min_total_buy_sol,
+        max_sell_count: args.max_sell_count,
+        min_buy_sell_ratio: args.min_buy_sell_ratio,
+        max_concurrent_positions: args.max_concurrent_positions,
+        exit_on_sell_count: args.exit_on_sell_count,
+        trading_fee_bps: args.trading_fee_bps,
+        slippage_bps: args.slippage_bps,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AddressFeaturesOutput {
     address: String,
-    wallet_entries: usize,
-    wallet_roundtrips: usize,
-    wallet_closed_roundtrips: usize,
-    strategy: String,
-    strategy_name: String,
-    eval_source: String,
-    clone_score: f64,
-    f1: f64,
-    precision: f64,
-    recall: f64,
-    matched_entries: usize,
-    strategy_entries: usize,
-    entry_delay_secs: Option<f64>,
-    hold_error_secs: Option<f64>,
-    size_error_ratio: Option<f64>,
-    count_alignment: f64,
-    fills: u64,
-    rejections: u64,
-    ending_equity_lamports: u64,
-    ending_cash_lamports: u64,
-    resolved_strategy: crate::args::StrategyArgs,
+    summary: WalletBehaviorSummary,
+    entries: Vec<WalletEntryFeature>,
+    roundtrips: Vec<WalletRoundtrip>,
 }
 
-#[derive(Debug, Serialize)]
-struct CloneRankOutput {
-    address: String,
-    wallet_entries: usize,
-    wallet_roundtrips: usize,
-    scanned_runs: i64,
-    ranked: Vec<CloneRankRow>,
-}
-
-#[derive(Debug, Serialize)]
-struct CloneRankRow {
-    run_id: i64,
-    strategy: String,
-    strategy_name: String,
-    run_mode: String,
-    source_type: String,
-    source_ref: String,
-    started_at: String,
-    stored_equity_lamports: String,
-    clone_score: f64,
-    f1: f64,
-    precision: f64,
-    recall: f64,
-    matched_entries: usize,
-    strategy_entries: usize,
-    entry_delay_secs: Option<f64>,
-    hold_error_secs: Option<f64>,
-    size_error_ratio: Option<f64>,
-    count_alignment: f64,
-}
-
-fn print_candidate(candidate: &crate::runtime::StrategyCloneCandidate) {
+fn print_candidate(candidate: &StrategyCloneCandidate) {
     println!(
         "family={} strategy_name={} clone_score={:.4} f1={:.4} precision={:.4} recall={:.4} matches={}/{} strategy_entries={} entry_delay={} hold_error={} size_error={} count_alignment={:.4} fills={} equity={} lamports",
         candidate.args.strategy,
@@ -559,4 +561,29 @@ fn print_candidate(candidate: &crate::runtime::StrategyCloneCandidate) {
         candidate.report.fills,
         candidate.report.ending_equity_lamports
     );
+    println!(
+        "  breakdown: entry={:.3} hold={:.3} size={:.3} token={:.3} exit={:.3} count={:.3}",
+        candidate.score.breakdown.entry_timing_similarity,
+        candidate.score.breakdown.hold_time_similarity,
+        candidate.score.breakdown.size_profile_similarity,
+        candidate.score.breakdown.token_selection_similarity,
+        candidate.score.breakdown.exit_behavior_similarity,
+        candidate.score.breakdown.count_alignment,
+    );
+}
+
+fn sweep_config_from_fit_args(args: &FitParamsArgs) -> pump_agent_app::strategy::SweepConfig {
+    pump_agent_app::strategy::SweepConfig {
+        buy_sol_values: args.buy_sol_values.clone(),
+        max_age_secs_values: args.max_age_secs_values.clone(),
+        min_buy_count_values: args.min_buy_count_values.clone(),
+        min_unique_buyers_values: args.min_unique_buyers_values.clone(),
+        min_total_buy_sol_values: args.min_total_buy_sol_values.clone(),
+        max_sell_count_values: args.max_sell_count_values.clone(),
+        min_buy_sell_ratio_values: args.min_buy_sell_ratio_values.clone(),
+        take_profit_bps_values: args.take_profit_bps_values.clone(),
+        stop_loss_bps_values: args.stop_loss_bps_values.clone(),
+        max_concurrent_positions_values: args.max_concurrent_positions_values.clone(),
+        exit_on_sell_count_values: args.exit_on_sell_count_values.clone(),
+    }
 }

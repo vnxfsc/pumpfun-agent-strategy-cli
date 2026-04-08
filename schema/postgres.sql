@@ -149,3 +149,80 @@ create index if not exists strategy_runs_run_mode_idx on strategy_runs (run_mode
 create index if not exists strategy_runs_sweep_batch_idx on strategy_runs (sweep_batch_id, id desc);
 create index if not exists strategy_runs_live_run_idx on strategy_runs (live_run_id, id desc);
 create index if not exists paper_position_snapshots_run_id_idx on paper_position_snapshots (strategy_run_id, id asc);
+
+create table if not exists task_runs (
+    id bigserial primary key,
+    task_id text not null unique,
+    task_kind text not null,
+    status text not null check (status in ('queued', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled')),
+    idempotency_key text null,
+    cancellation_requested boolean not null default false,
+    request_payload jsonb not null default '{}'::jsonb,
+    result_payload jsonb null,
+    error_payload jsonb null,
+    submitted_at timestamptz not null default now(),
+    started_at timestamptz null,
+    finished_at timestamptz null
+);
+
+create unique index if not exists task_runs_idempotency_key_idx
+    on task_runs (task_kind, idempotency_key)
+    where idempotency_key is not null;
+
+create index if not exists task_runs_status_idx on task_runs (status, submitted_at desc);
+create index if not exists task_runs_kind_idx on task_runs (task_kind, submitted_at desc);
+
+create table if not exists experiments (
+    id bigserial primary key,
+    experiment_id text not null unique,
+    title text not null,
+    target_wallet text not null,
+    status text not null default 'active',
+    thesis text null,
+    notes jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create table if not exists hypotheses (
+    id bigserial primary key,
+    hypothesis_id text not null unique,
+    experiment_id text not null references experiments (experiment_id) on delete cascade,
+    family text not null,
+    description text not null,
+    status text not null default 'open',
+    strategy_config jsonb not null default '{}'::jsonb,
+    sample_window jsonb not null default '{}'::jsonb,
+    notes jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create table if not exists evaluations (
+    id bigserial primary key,
+    evaluation_id text not null unique,
+    experiment_id text not null references experiments (experiment_id) on delete cascade,
+    hypothesis_id text null references hypotheses (hypothesis_id) on delete set null,
+    strategy_run_id bigint null references strategy_runs (id) on delete set null,
+    task_id text null references task_runs (task_id) on delete set null,
+    target_wallet text not null,
+    family text null,
+    strategy_name text null,
+    source_type text not null,
+    source_ref text not null,
+    score_overall double precision null,
+    score_breakdown jsonb not null default '{}'::jsonb,
+    metrics jsonb not null default '{}'::jsonb,
+    failure_tags text[] not null default '{}'::text[],
+    artifact_paths jsonb not null default '[]'::jsonb,
+    notes jsonb not null default '{}'::jsonb,
+    conclusion text null,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists experiments_target_wallet_idx on experiments (target_wallet, created_at desc);
+create index if not exists hypotheses_experiment_idx on hypotheses (experiment_id, created_at desc);
+create index if not exists evaluations_experiment_idx on evaluations (experiment_id, created_at desc);
+create index if not exists evaluations_hypothesis_idx on evaluations (hypothesis_id, created_at desc);
+create index if not exists evaluations_strategy_run_idx on evaluations (strategy_run_id);
+create index if not exists evaluations_task_id_idx on evaluations (task_id);

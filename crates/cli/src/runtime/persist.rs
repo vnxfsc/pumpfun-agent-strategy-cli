@@ -13,10 +13,6 @@ pub fn serialize_strategy_config(strategy_args: &StrategyArgs) -> Result<serde_j
     Ok(serde_json::to_value(&resolved)?)
 }
 
-pub fn deserialize_strategy_config(value: &serde_json::Value) -> Result<StrategyArgs> {
-    Ok(serde_json::from_value(value.clone())?)
-}
-
 pub async fn persist_run(
     store: &PgEventStore,
     source_type: &str,

@@ -1,17 +1,30 @@
-use anyhow::Result;
-use pump_agent_core::PgEventStore;
+use pump_agent_app::usecases::{DatabaseRequest, StatsRequest, fetch_stats};
+use serde::Serialize;
+use std::time::Instant;
 
 use crate::{
-    args::{DbArgs, TailArgs},
+    args::{DbArgs, OutputFormat, TailArgs},
     config::required_config,
+    output::{CommandResult, emit_json_success},
 };
 
 use crate::commands::helpers::print_event;
 
-pub async fn stats(args: DbArgs) -> Result<()> {
+pub async fn stats(args: DbArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    let stats = store.fetch_event_stats().await?;
+    let stats = fetch_stats(StatsRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: false,
+        },
+    })
+    .await?;
+
+    if format.is_json() {
+        return emit_json_success("stats", &StatsOutput { stats }, started);
+    }
 
     println!("total events      : {}", stats.total_events);
     println!("total trades      : {}", stats.total_trades);
@@ -31,7 +44,9 @@ pub async fn stats(args: DbArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn tail(args: TailArgs) -> Result<()> {
+pub async fn tail(args: TailArgs) -> anyhow::Result<()> {
+    use pump_agent_core::PgEventStore;
+
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
     let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
     let events = store.tail_events(args.limit).await?;
@@ -40,4 +55,9 @@ pub async fn tail(args: TailArgs) -> Result<()> {
         print_event(&event);
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct StatsOutput {
+    stats: pump_agent_core::EventStats,
 }

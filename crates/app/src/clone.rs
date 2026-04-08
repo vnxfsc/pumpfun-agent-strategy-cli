@@ -4,17 +4,13 @@ use anyhow::{Result, bail};
 use pump_agent_core::model::FillReport;
 use pump_agent_core::{BacktestReport, EventEnvelope, MarketState, PumpEvent};
 
-use crate::{
-    args::{StrategyArgs, SweepDbArgs},
-    config::{lamports_i128_to_sol, lamports_to_sol},
-    runtime::{build_sweep_variants, run_strategy},
+use crate::strategy::{
+    StrategyConfig, StrategyExecution, SweepConfig, build_sweep_variants, run_strategy,
 };
-
-use super::strategy::StrategyExecution;
 
 const MATCH_TOLERANCE_SECS: i64 = 15;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletBehaviorReport {
     pub address: String,
     pub summary: WalletBehaviorSummary,
@@ -22,7 +18,7 @@ pub struct WalletBehaviorReport {
     pub roundtrips: Vec<WalletRoundtrip>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletBehaviorSummary {
     pub entry_count: usize,
     pub roundtrip_count: usize,
@@ -40,7 +36,7 @@ pub struct WalletBehaviorSummary {
     pub avg_hold_secs_closed: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletEntryFeature {
     pub mint: String,
     pub entry_seq: u64,
@@ -56,7 +52,7 @@ pub struct WalletEntryFeature {
     pub buy_sell_ratio_before: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletRoundtrip {
     pub mint: String,
     pub status: String,
@@ -67,7 +63,17 @@ pub struct WalletRoundtrip {
     pub gross_sell_lamports: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CloneScoreBreakdown {
+    pub entry_timing_similarity: f64,
+    pub hold_time_similarity: f64,
+    pub size_profile_similarity: f64,
+    pub token_selection_similarity: f64,
+    pub exit_behavior_similarity: f64,
+    pub count_alignment: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CloneScore {
     pub overall: f64,
     pub precision: f64,
@@ -80,16 +86,17 @@ pub struct CloneScore {
     pub avg_hold_error_secs: Option<f64>,
     pub avg_size_error_ratio: Option<f64>,
     pub count_alignment: f64,
+    pub breakdown: CloneScoreBreakdown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StrategyCloneCandidate {
-    pub args: StrategyArgs,
+    pub args: StrategyConfig,
     pub report: BacktestReport,
     pub score: CloneScore,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CloneFitSummary {
     pub candidates: Vec<StrategyCloneCandidate>,
 }
@@ -235,7 +242,7 @@ pub fn extract_wallet_behavior(address: &str, events: &[EventEnvelope]) -> Walle
 
 pub fn score_strategy_execution(
     wallet: &WalletBehaviorReport,
-    args: &StrategyArgs,
+    args: &StrategyConfig,
     execution: &StrategyExecution,
 ) -> StrategyCloneCandidate {
     let strategy_roundtrips = derive_strategy_roundtrips(&execution.result.fills);
@@ -251,7 +258,7 @@ pub fn score_strategy_execution(
 pub fn run_clone_fit(
     events: &[EventEnvelope],
     wallet: &WalletBehaviorReport,
-    variants: Vec<StrategyArgs>,
+    variants: Vec<StrategyConfig>,
 ) -> Result<CloneFitSummary> {
     let mut candidates = Vec::with_capacity(variants.len());
     for variant in variants {
@@ -276,9 +283,9 @@ pub fn run_clone_fit(
     Ok(CloneFitSummary { candidates })
 }
 
-pub fn default_strategy_args_for_family(family: &str) -> Result<StrategyArgs> {
+pub fn default_strategy_config_for_family(family: &str) -> Result<StrategyConfig> {
     match family {
-        "momentum" => Ok(StrategyArgs {
+        "momentum" => Ok(StrategyConfig {
             strategy: "momentum".to_string(),
             strategy_config: None,
             starting_sol: 10.0,
@@ -298,7 +305,7 @@ pub fn default_strategy_args_for_family(family: &str) -> Result<StrategyArgs> {
             trading_fee_bps: 100,
             slippage_bps: 50,
         }),
-        "early_flow" | "early-flow" => Ok(StrategyArgs {
+        "early_flow" | "early-flow" => Ok(StrategyConfig {
             strategy: "early_flow".to_string(),
             strategy_config: None,
             starting_sol: 10.0,
@@ -318,33 +325,55 @@ pub fn default_strategy_args_for_family(family: &str) -> Result<StrategyArgs> {
             trading_fee_bps: 100,
             slippage_bps: 50,
         }),
+        "breakout" => Ok(StrategyConfig {
+            strategy: "breakout".to_string(),
+            strategy_config: None,
+            starting_sol: 10.0,
+            buy_sol: 0.18,
+            max_age_secs: 35,
+            min_buy_count: 5,
+            min_unique_buyers: 5,
+            min_net_buy_sol: 0.7,
+            take_profit_bps: 2_200,
+            stop_loss_bps: 900,
+            max_hold_secs: 75,
+            min_total_buy_sol: 1.2,
+            max_sell_count: 2,
+            min_buy_sell_ratio: 3.5,
+            max_concurrent_positions: 3,
+            exit_on_sell_count: 4,
+            trading_fee_bps: 100,
+            slippage_bps: 50,
+        }),
+        "liquidity_follow" | "liquidity-follow" => Ok(StrategyConfig {
+            strategy: "liquidity_follow".to_string(),
+            strategy_config: None,
+            starting_sol: 10.0,
+            buy_sol: 0.18,
+            max_age_secs: 55,
+            min_buy_count: 4,
+            min_unique_buyers: 4,
+            min_net_buy_sol: 0.5,
+            take_profit_bps: 2_000,
+            stop_loss_bps: 1_000,
+            max_hold_secs: 120,
+            min_total_buy_sol: 1.5,
+            max_sell_count: 3,
+            min_buy_sell_ratio: 2.5,
+            max_concurrent_positions: 4,
+            exit_on_sell_count: 4,
+            trading_fee_bps: 100,
+            slippage_bps: 50,
+        }),
         other => bail!("unsupported strategy family '{}'", other),
     }
 }
 
 pub fn build_fit_variants(
-    base: &StrategyArgs,
-    args: &crate::args::FitParamsArgs,
-) -> Result<Vec<StrategyArgs>> {
-    let sweep = SweepDbArgs {
-        database_url: None,
-        max_db_connections: args.max_db_connections,
-        top: args.top,
-        buy_sol_values: args.buy_sol_values.clone(),
-        max_age_secs_values: args.max_age_secs_values.clone(),
-        min_buy_count_values: args.min_buy_count_values.clone(),
-        min_unique_buyers_values: args.min_unique_buyers_values.clone(),
-        min_total_buy_sol_values: args.min_total_buy_sol_values.clone(),
-        max_sell_count_values: args.max_sell_count_values.clone(),
-        min_buy_sell_ratio_values: args.min_buy_sell_ratio_values.clone(),
-        take_profit_bps_values: args.take_profit_bps_values.clone(),
-        stop_loss_bps_values: args.stop_loss_bps_values.clone(),
-        max_concurrent_positions_values: args.max_concurrent_positions_values.clone(),
-        exit_on_sell_count_values: args.exit_on_sell_count_values.clone(),
-        strategy: base.clone(),
-    };
-
-    build_sweep_variants(base, &sweep)
+    base: &StrategyConfig,
+    sweep: &SweepConfig,
+) -> Result<Vec<StrategyConfig>> {
+    build_sweep_variants(base, sweep)
 }
 
 fn summarize_wallet_behavior(
@@ -458,8 +487,17 @@ fn score_clone_similarity(
     let mut entry_delay_secs = Vec::new();
     let mut hold_error_secs = Vec::new();
     let mut size_error_ratio = Vec::new();
+    let mut exit_alignment = Vec::new();
 
     let wallet_roundtrips = wallet.roundtrips.iter().collect::<Vec<_>>();
+    let wallet_mints = wallet_roundtrips
+        .iter()
+        .map(|roundtrip| roundtrip.mint.as_str())
+        .collect::<HashSet<_>>();
+    let strategy_mints = strategy_roundtrips
+        .iter()
+        .map(|roundtrip| roundtrip.mint.as_str())
+        .collect::<HashSet<_>>();
     for wallet_roundtrip in &wallet_roundtrips {
         let Some(wallet_entry_ts) = wallet_roundtrip.entry_ts else {
             continue;
@@ -496,6 +534,13 @@ fn score_clone_similarity(
             {
                 hold_error_secs.push((wallet_hold - strategy_hold).abs() as f64);
             }
+            let wallet_closed = wallet_roundtrip.status == "closed";
+            let strategy_closed = strategy_roundtrip.hold_secs.is_some();
+            exit_alignment.push(if wallet_closed == strategy_closed {
+                1.0
+            } else {
+                0.0
+            });
             if wallet_roundtrip.gross_buy_lamports > 0 {
                 let diff = wallet_roundtrip
                     .gross_buy_lamports
@@ -534,13 +579,30 @@ fn score_clone_similarity(
     let size_score = avg_size_error_ratio
         .map(|value| (1.0 - value).clamp(0.0, 1.0))
         .unwrap_or(0.0);
+    let token_selection_similarity = if wallet_mints.is_empty() && strategy_mints.is_empty() {
+        1.0
+    } else {
+        wallet_mints.intersection(&strategy_mints).count() as f64
+            / wallet_mints.union(&strategy_mints).count().max(1) as f64
+    };
+    let exit_behavior_similarity = average_f64(exit_alignment.iter().copied()).unwrap_or(0.0);
+    let breakdown = CloneScoreBreakdown {
+        entry_timing_similarity: delay_score,
+        hold_time_similarity: hold_score,
+        size_profile_similarity: size_score,
+        token_selection_similarity,
+        exit_behavior_similarity,
+        count_alignment,
+    };
 
     CloneScore {
-        overall: 0.5 * f1
-            + 0.15 * delay_score
-            + 0.15 * hold_score
-            + 0.1 * size_score
-            + 0.1 * count_alignment,
+        overall: 0.25 * f1
+            + 0.15 * breakdown.entry_timing_similarity
+            + 0.15 * breakdown.hold_time_similarity
+            + 0.1 * breakdown.size_profile_similarity
+            + 0.15 * breakdown.token_selection_similarity
+            + 0.1 * breakdown.exit_behavior_similarity
+            + 0.1 * breakdown.count_alignment,
         precision,
         recall,
         f1,
@@ -551,6 +613,7 @@ fn score_clone_similarity(
         avg_hold_error_secs,
         avg_size_error_ratio,
         count_alignment,
+        breakdown,
     }
 }
 
@@ -584,9 +647,17 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
+fn lamports_to_sol(lamports: u64) -> f64 {
+    lamports as f64 / 1_000_000_000.0
+}
+
+fn lamports_i128_to_sol(lamports: i128) -> f64 {
+    lamports as f64 / 1_000_000_000.0
+}
+
 #[cfg(test)]
 mod tests {
-    use pump_agent_core::{MintCreatedEvent, OrderSide, PumpEvent, TradeEvent};
+    use pump_agent_core::{MintCreatedEvent, OrderSide, PumpEvent, StrategyMetadata, TradeEvent};
 
     use super::*;
 
@@ -715,7 +786,7 @@ mod tests {
         let execution = StrategyExecution {
             result: pump_agent_core::BacktestRunResult {
                 report: BacktestReport {
-                    strategy: pump_agent_core::StrategyMetadata { name: "test" },
+                    strategy: StrategyMetadata { name: "test" },
                     processed_events: 0,
                     fills: 2,
                     rejections: 0,
@@ -762,7 +833,7 @@ mod tests {
             },
         };
 
-        let args = default_strategy_args_for_family("momentum").expect("family should exist");
+        let args = default_strategy_config_for_family("momentum").expect("family should exist");
         let candidate = score_strategy_execution(&wallet, &args, &execution);
         assert_eq!(candidate.score.matched_entries, 1);
         assert!(candidate.score.overall > 0.7);

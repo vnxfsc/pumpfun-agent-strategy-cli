@@ -1,20 +1,33 @@
-use anyhow::Result;
-use pump_agent_core::PgEventStore;
+use pump_agent_app::usecases::{
+    AddressInspectRequest, DatabaseRequest, address_inspect as load_address_inspect,
+};
+use serde::Serialize;
+use std::time::Instant;
 
 use crate::{
-    args::{AddressInspectArgs, AddressRoundtripsArgs, AddressTimelineArgs},
+    args::{AddressInspectArgs, AddressRoundtripsArgs, AddressTimelineArgs, OutputFormat},
     config::{blank_to_na, lamports_i128_to_sol, lamports_str_to_sol, required_config},
+    output::{CommandError, CommandResult, emit_json_success},
 };
 
-use crate::commands::helpers::SCHEMA_SQL;
-
-pub async fn address_inspect(args: AddressInspectArgs) -> Result<()> {
+pub async fn address_inspect(args: AddressInspectArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let report = store
-        .inspect_address(&args.address, args.top_mints_limit, args.roundtrip_limit)
-        .await?;
+    let report = load_address_inspect(AddressInspectRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        address: args.address,
+        top_mints_limit: args.top_mints_limit,
+        roundtrip_limit: args.roundtrip_limit,
+    })
+    .await?;
+
+    if format.is_json() {
+        return emit_json_success("address_inspect", &AddressInspectOutput { report }, started);
+    }
 
     let overview = report.overview;
     println!("address              : {}", overview.address);
@@ -62,7 +75,17 @@ pub async fn address_inspect(args: AddressInspectArgs) -> Result<()> {
     );
     println!(
         "net cash flow        : {:.6} SOL",
-        lamports_i128_to_sol(overview.net_cash_flow_lamports.parse::<i128>()?)
+        lamports_i128_to_sol(
+            overview
+                .net_cash_flow_lamports
+                .parse::<i128>()
+                .map_err(|error| {
+                    CommandError::internal(format!(
+                        "failed to parse net_cash_flow_lamports '{}': {}",
+                        overview.net_cash_flow_lamports, error
+                    ))
+                })?,
+        )
     );
     println!("roundtrips           : {}", overview.roundtrip_count);
     println!("closed roundtrips    : {}", overview.closed_roundtrip_count);
@@ -70,7 +93,17 @@ pub async fn address_inspect(args: AddressInspectArgs) -> Result<()> {
     println!("orphan sells         : {}", overview.orphan_sell_count);
     println!(
         "realized pnl         : {:.6} SOL",
-        lamports_i128_to_sol(overview.realized_pnl_lamports.parse::<i128>()?)
+        lamports_i128_to_sol(
+            overview
+                .realized_pnl_lamports
+                .parse::<i128>()
+                .map_err(|error| {
+                    CommandError::internal(format!(
+                        "failed to parse realized_pnl_lamports '{}': {}",
+                        overview.realized_pnl_lamports, error
+                    ))
+                })?,
+        )
     );
     println!(
         "win rate closed      : {}",
@@ -98,7 +131,16 @@ pub async fn address_inspect(args: AddressInspectArgs) -> Result<()> {
             mint.sell_count,
             lamports_str_to_sol(&mint.gross_buy_lamports)?,
             lamports_str_to_sol(&mint.gross_sell_lamports)?,
-            lamports_i128_to_sol(mint.net_cash_flow_lamports.parse::<i128>()?),
+            lamports_i128_to_sol(
+                mint.net_cash_flow_lamports
+                    .parse::<i128>()
+                    .map_err(|error| {
+                        CommandError::internal(format!(
+                            "failed to parse mint net_cash_flow_lamports '{}': {}",
+                            mint.net_cash_flow_lamports, error
+                        ))
+                    },)?
+            ),
             mint.first_seq,
             mint.last_seq,
             mint.last_trade_at
@@ -117,7 +159,11 @@ pub async fn address_inspect(args: AddressInspectArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn address_timeline(args: AddressTimelineArgs) -> Result<()> {
+pub async fn address_timeline(args: AddressTimelineArgs) -> anyhow::Result<()> {
+    use pump_agent_core::PgEventStore;
+
+    use crate::commands::helpers::SCHEMA_SQL;
+
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
     let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
     store.apply_schema(SCHEMA_SQL).await?;
@@ -151,7 +197,11 @@ pub async fn address_timeline(args: AddressTimelineArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn address_roundtrips(args: AddressRoundtripsArgs) -> Result<()> {
+pub async fn address_roundtrips(args: AddressRoundtripsArgs) -> anyhow::Result<()> {
+    use pump_agent_core::PgEventStore;
+
+    use crate::commands::helpers::SCHEMA_SQL;
+
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
     let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
     store.apply_schema(SCHEMA_SQL).await?;
@@ -171,7 +221,7 @@ pub async fn address_roundtrips(args: AddressRoundtripsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_roundtrip(roundtrip: &pump_agent_core::AddressRoundtrip) -> Result<()> {
+fn print_roundtrip(roundtrip: &pump_agent_core::AddressRoundtrip) -> anyhow::Result<()> {
     println!(
         "mint={} status={} opened_seq={} opened_at={} closed_seq={} closed_at={} hold={} entries={} exits={} gross_buy={:.6} SOL gross_sell={:.6} SOL net_entry={:.6} SOL net_exit={:.6} SOL pnl={} roi_bps={} bought_token={} sold_token={}",
         roundtrip.mint,
@@ -220,4 +270,9 @@ fn print_roundtrip(roundtrip: &pump_agent_core::AddressRoundtrip) -> Result<()> 
     );
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AddressInspectOutput {
+    report: pump_agent_core::AddressInspectReport,
 }

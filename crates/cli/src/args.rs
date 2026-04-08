@@ -1,6 +1,19 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Human,
+    Json,
+}
+
+impl OutputFormat {
+    pub fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "pump-agent")]
@@ -8,6 +21,9 @@ use clap::{Parser, Subcommand};
     about = "Replay Pump mint/trade events, ingest Yellowstone streams, and run local paper strategies"
 )]
 pub struct Cli {
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
+    pub format: OutputFormat,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -32,14 +48,55 @@ pub enum Command {
     AddressTimeline(AddressTimelineArgs),
     AddressRoundtrips(AddressRoundtripsArgs),
     AddressFeatures(AddressFeaturesArgs),
+    WalletDossier(WalletDossierArgs),
+    MintShardSummary(MintShardSummaryArgs),
     AddressBrief(AddressBriefArgs),
     CloneReport(CloneReportArgs),
+    ExplainWhy(ExplainWhyArgs),
+    SuggestNextExperiment(SuggestNextExperimentArgs),
     CloneEval(CloneEvalArgs),
     CloneRank(CloneRankArgs),
     InferStrategy(InferStrategyArgs),
     FitParams(FitParamsArgs),
     AddressExport(AddressExportArgs),
     Ingest(IngestArgs),
+}
+
+impl Command {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Replay(_) => "replay",
+            Self::ReplayDb(_) => "replay_db",
+            Self::SweepDb(_) => "sweep_db",
+            Self::LivePaper(_) => "live_paper",
+            Self::ServeDashboard(_) => "serve_dashboard",
+            Self::StrategyScaffold(_) => "strategy_scaffold",
+            Self::CloneScaffold(_) => "clone_scaffold",
+            Self::Stats(_) => "stats",
+            Self::Runs(_) => "runs",
+            Self::RunInspect(_) => "run_inspect",
+            Self::CompareRuns(_) => "compare_runs",
+            Self::SweepBatchInspect(_) => "sweep_batch_inspect",
+            Self::Tail(_) => "tail",
+            Self::MintInspect(_) => "mint_inspect",
+            Self::AddressInspect(_) => "address_inspect",
+            Self::AddressTimeline(_) => "address_timeline",
+            Self::AddressRoundtrips(_) => "address_roundtrips",
+            Self::AddressFeatures(_) => "address_features",
+            Self::WalletDossier(_) => "wallet_dossier",
+            Self::MintShardSummary(_) => "mint_shard_summary",
+            Self::AddressBrief(_) => "address_brief",
+            Self::CloneReport(_) => "clone_report",
+            Self::ExplainWhy(_) => "explain_why",
+            Self::SuggestNextExperiment(_) => "suggest_next_experiment",
+            Self::CloneEval(_) => "clone_eval",
+            Self::CloneRank(_) => "clone_rank",
+            Self::InferStrategy(_) => "infer_strategy",
+            Self::FitParams(_) => "fit_params",
+            Self::AddressExport(_) => "address_export",
+            Self::Ingest(_) => "ingest",
+        }
+    }
 }
 
 #[derive(Debug, Parser, Clone, serde::Serialize, serde::Deserialize)]
@@ -340,6 +397,45 @@ pub struct AddressFeaturesArgs {
 }
 
 #[derive(Debug, Parser)]
+pub struct WalletDossierArgs {
+    #[arg(long)]
+    pub database_url: Option<String>,
+
+    #[arg(long, default_value_t = 5)]
+    pub max_db_connections: u32,
+
+    #[arg(long)]
+    pub address: String,
+
+    #[arg(long)]
+    pub experiment_id: Option<String>,
+
+    #[arg(long, default_value_t = 10)]
+    pub top_mints_limit: i64,
+
+    #[arg(long, default_value_t = 10)]
+    pub roundtrip_limit: i64,
+
+    #[arg(long, default_value_t = 5)]
+    pub sample_limit: usize,
+}
+
+#[derive(Debug, Parser)]
+pub struct MintShardSummaryArgs {
+    #[arg(long)]
+    pub database_url: Option<String>,
+
+    #[arg(long, default_value_t = 5)]
+    pub max_db_connections: u32,
+
+    #[arg(long)]
+    pub address: String,
+
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Parser)]
 pub struct AddressBriefArgs {
     #[arg(long)]
     pub database_url: Option<String>,
@@ -379,6 +475,33 @@ pub struct CloneReportArgs {
 
     #[arg(long, default_value_t = false)]
     pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct ExplainWhyArgs {
+    #[arg(long)]
+    pub database_url: Option<String>,
+
+    #[arg(long, default_value_t = 5)]
+    pub max_db_connections: u32,
+
+    #[arg(long)]
+    pub address: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct SuggestNextExperimentArgs {
+    #[arg(long)]
+    pub database_url: Option<String>,
+
+    #[arg(long, default_value_t = 5)]
+    pub max_db_connections: u32,
+
+    #[arg(long)]
+    pub address: String,
+
+    #[arg(long)]
+    pub experiment_id: Option<String>,
 }
 
 #[derive(Debug, Parser)]

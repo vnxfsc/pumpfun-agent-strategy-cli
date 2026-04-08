@@ -1,18 +1,39 @@
-use anyhow::Result;
-use pump_agent_core::PgEventStore;
+use pump_agent_app::{
+    api::compare_runs_output,
+    usecases::{
+        CompareRunsRequest, DatabaseRequest, RunInspectRequest, RunsRequest,
+        SweepBatchInspectRequest, compare_runs as compare_runs_usecase, inspect_run,
+        inspect_sweep_batch, list_runs,
+    },
+};
+use serde::Serialize;
+use serde_json::json;
+use std::time::Instant;
 
 use crate::{
-    args::{CompareRunsArgs, RunInspectArgs, RunsArgs, SweepBatchInspectArgs},
+    args::{CompareRunsArgs, OutputFormat, RunInspectArgs, RunsArgs, SweepBatchInspectArgs},
     config::{blank_to_na, lamports_str_to_sol, required_config},
+    output::{CommandError, CommandResult, emit_json_success},
 };
 
-use crate::commands::helpers::{SCHEMA_SQL, json_num_string};
+use crate::commands::helpers::json_num_string;
 
-pub async fn runs(args: RunsArgs) -> Result<()> {
+pub async fn runs(args: RunsArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let runs = store.list_strategy_runs(args.limit).await?;
+    let runs = list_runs(RunsRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        limit: args.limit,
+    })
+    .await?;
+
+    if format.is_json() {
+        return emit_json_success("runs", &RunsOutput { runs }, started);
+    }
 
     if runs.is_empty() {
         println!("no strategy runs found");
@@ -39,16 +60,39 @@ pub async fn runs(args: RunsArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_inspect(args: RunInspectArgs) -> Result<()> {
+pub async fn run_inspect(args: RunInspectArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let report = store.inspect_strategy_run(args.id, args.fill_limit).await?;
+    let report = inspect_run(RunInspectRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        run_id: args.id,
+        fill_limit: args.fill_limit,
+    })
+    .await?;
 
     let Some(run) = report.run else {
-        println!("strategy run not found: {}", args.id);
-        return Ok(());
+        return Err(
+            CommandError::not_found(format!("strategy run not found: {}", args.id)).with_details(
+                json!({
+                    "resource": "strategy_run",
+                    "id": args.id,
+                }),
+            ),
+        );
     };
+
+    if format.is_json() {
+        let output = RunInspectOutput {
+            run,
+            fills: report.fills,
+            position_snapshots: report.position_snapshots,
+        };
+        return emit_json_success("run_inspect", &output, started);
+    }
 
     println!("id              : {}", run.id);
     println!("strategy        : {}", run.strategy_name);
@@ -81,7 +125,9 @@ pub async fn run_inspect(args: RunInspectArgs) -> Result<()> {
     );
     println!(
         "config          : {}",
-        serde_json::to_string_pretty(&run.config)?
+        serde_json::to_string_pretty(&run.config).map_err(|error| {
+            CommandError::internal(format!("failed to render run config as JSON: {error}"))
+        })?
     );
 
     println!();
@@ -133,105 +179,138 @@ pub async fn run_inspect(args: RunInspectArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn compare_runs(args: CompareRunsArgs) -> Result<()> {
+pub async fn compare_runs(args: CompareRunsArgs, format: OutputFormat) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-
-    let left = store
-        .inspect_strategy_run(args.left_id, args.fill_limit)
-        .await?;
-    let right = store
-        .inspect_strategy_run(args.right_id, args.fill_limit)
-        .await?;
-
-    let Some(left_run) = left.run else {
-        println!("strategy run not found: {}", args.left_id);
-        return Ok(());
+    let database = DatabaseRequest {
+        database_url,
+        max_db_connections: args.max_db_connections,
+        apply_schema: true,
     };
-    let Some(right_run) = right.run else {
-        println!("strategy run not found: {}", args.right_id);
-        return Ok(());
+    let result = compare_runs_usecase(CompareRunsRequest {
+        database,
+        left_run_id: args.left_id,
+        right_run_id: args.right_id,
+        fill_limit: args.fill_limit,
+    })
+    .await?;
+    let Some(result) = result else {
+        return Err(
+            CommandError::not_found("one or both strategy runs were not found").with_details(
+                json!({
+                    "resource": "strategy_run",
+                    "left_id": args.left_id,
+                    "right_id": args.right_id,
+                }),
+            ),
+        );
     };
+    let output = compare_runs_output(result);
+    let left_equity = lamports_str_to_sol(&output.left_run.ending_equity_lamports)?;
+    let right_equity = lamports_str_to_sol(&output.right_run.ending_equity_lamports)?;
+    let left_cash = lamports_str_to_sol(&output.left_run.ending_cash_lamports)?;
+    let right_cash = lamports_str_to_sol(&output.right_run.ending_cash_lamports)?;
 
-    let left_equity = lamports_str_to_sol(&left_run.ending_equity_lamports)?;
-    let right_equity = lamports_str_to_sol(&right_run.ending_equity_lamports)?;
-    let left_cash = lamports_str_to_sol(&left_run.ending_cash_lamports)?;
-    let right_cash = lamports_str_to_sol(&right_run.ending_cash_lamports)?;
+    if format.is_json() {
+        return emit_json_success("compare_runs", &output, started);
+    }
 
-    println!("compare runs left={} right={}", left_run.id, right_run.id);
+    println!(
+        "compare runs left={} right={}",
+        output.left_run.id, output.right_run.id
+    );
     println!(
         "strategy       : {} vs {}",
-        left_run.strategy_name, right_run.strategy_name
+        output.left_run.strategy_name, output.right_run.strategy_name
     );
     println!(
         "mode           : {} vs {}",
-        left_run.run_mode, right_run.run_mode
+        output.left_run.run_mode, output.right_run.run_mode
     );
     println!(
         "source         : {} vs {}",
-        left_run.source_type, right_run.source_type
+        output.left_run.source_type, output.right_run.source_type
     );
     println!(
         "events         : {} vs {} (delta {:+})",
-        left_run.processed_events,
-        right_run.processed_events,
-        right_run.processed_events - left_run.processed_events
+        output.left_run.processed_events, output.right_run.processed_events, output.deltas.events
     );
     println!(
         "fills          : {} vs {} (delta {:+})",
-        left_run.fills,
-        right_run.fills,
-        right_run.fills - left_run.fills
+        output.left_run.fills, output.right_run.fills, output.deltas.fills
     );
     println!(
         "rejections     : {} vs {} (delta {:+})",
-        left_run.rejections,
-        right_run.rejections,
-        right_run.rejections - left_run.rejections
+        output.left_run.rejections, output.right_run.rejections, output.deltas.rejections
     );
     println!(
         "cash           : {:.6} vs {:.6} SOL (delta {:+.6})",
-        left_cash,
-        right_cash,
-        right_cash - left_cash
+        left_cash, right_cash, output.deltas.cash_sol
     );
     println!(
         "equity         : {:.6} vs {:.6} SOL (delta {:+.6})",
-        left_equity,
-        right_equity,
-        right_equity - left_equity
+        left_equity, right_equity, output.deltas.equity_sol
     );
     println!(
         "snapshots      : {} vs {}",
-        left.position_snapshots.len(),
-        right.position_snapshots.len()
+        output.loaded_position_snapshots.left, output.loaded_position_snapshots.right
     );
     println!(
         "fills loaded   : {} vs {}",
-        left.fills.len(),
-        right.fills.len()
+        output.loaded_fills.left, output.loaded_fills.right
     );
 
     println!();
-    println!("config diff:");
-    let left_cfg = serde_json::to_string_pretty(&left_run.config)?;
-    let right_cfg = serde_json::to_string_pretty(&right_run.config)?;
-    println!("left  config:\n{}", left_cfg);
-    println!("right config:\n{}", right_cfg);
+    println!(
+        "strategy diff  : family_changed={} changed_fields={}",
+        output.strategy_diff.family_changed, output.strategy_diff.changed_field_count
+    );
+    for field in &output.strategy_diff.changed_fields {
+        let delta = field
+            .numeric_delta
+            .map(|value| format!(" delta {:+.6}", value))
+            .unwrap_or_default();
+        println!(
+            "  - {}: {} -> {}{}",
+            field.field, field.left, field.right, delta
+        );
+    }
 
     Ok(())
 }
 
-pub async fn sweep_batch_inspect(args: SweepBatchInspectArgs) -> Result<()> {
+pub async fn sweep_batch_inspect(
+    args: SweepBatchInspectArgs,
+    format: OutputFormat,
+) -> CommandResult<()> {
+    let started = Instant::now();
     let database_url = required_config(args.database_url, "DATABASE_URL")?;
-    let store = PgEventStore::connect(&database_url, args.max_db_connections).await?;
-    store.apply_schema(SCHEMA_SQL).await?;
-    let report = store.inspect_sweep_batch(&args.batch_id).await?;
+    let report = inspect_sweep_batch(SweepBatchInspectRequest {
+        database: DatabaseRequest {
+            database_url,
+            max_db_connections: args.max_db_connections,
+            apply_schema: true,
+        },
+        batch_id: args.batch_id.clone(),
+    })
+    .await?;
 
     if report.runs.is_empty() {
-        println!("sweep batch not found: {}", args.batch_id);
-        return Ok(());
+        return Err(
+            CommandError::not_found(format!("sweep batch not found: {}", args.batch_id))
+                .with_details(json!({
+                    "resource": "sweep_batch",
+                    "batch_id": args.batch_id,
+                })),
+        );
+    }
+
+    if format.is_json() {
+        return emit_json_success(
+            "sweep_batch_inspect",
+            &SweepBatchInspectOutput { report },
+            started,
+        );
     }
 
     println!("sweep batch id : {}", report.sweep_batch_id);
@@ -273,4 +352,21 @@ pub async fn sweep_batch_inspect(args: SweepBatchInspectArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct RunsOutput {
+    runs: Vec<pump_agent_core::StrategyRunRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunInspectOutput {
+    run: pump_agent_core::StrategyRunDetail,
+    fills: Vec<pump_agent_core::RunFillRow>,
+    position_snapshots: Vec<pump_agent_core::PositionSnapshotRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct SweepBatchInspectOutput {
+    report: pump_agent_core::SweepBatchInspectReport,
 }

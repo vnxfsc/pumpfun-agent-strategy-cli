@@ -85,6 +85,76 @@ pub struct StrategyRunRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRunRow {
+    pub task_id: String,
+    pub task_kind: String,
+    pub status: String,
+    pub idempotency_key: Option<String>,
+    pub cancellation_requested: bool,
+    pub request_payload: serde_json::Value,
+    pub result_payload: Option<serde_json::Value>,
+    pub error_payload: Option<serde_json::Value>,
+    pub submitted_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentRow {
+    pub experiment_id: String,
+    pub title: String,
+    pub target_wallet: String,
+    pub status: String,
+    pub thesis: Option<String>,
+    pub notes: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HypothesisRow {
+    pub hypothesis_id: String,
+    pub experiment_id: String,
+    pub family: String,
+    pub description: String,
+    pub status: String,
+    pub strategy_config: serde_json::Value,
+    pub sample_window: serde_json::Value,
+    pub notes: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationRow {
+    pub evaluation_id: String,
+    pub experiment_id: String,
+    pub hypothesis_id: Option<String>,
+    pub strategy_run_id: Option<i64>,
+    pub task_id: Option<String>,
+    pub target_wallet: String,
+    pub family: Option<String>,
+    pub strategy_name: Option<String>,
+    pub source_type: String,
+    pub source_ref: String,
+    pub score_overall: Option<f64>,
+    pub score_breakdown: serde_json::Value,
+    pub metrics: serde_json::Value,
+    pub failure_tags: Vec<String>,
+    pub artifact_paths: serde_json::Value,
+    pub notes: serde_json::Value,
+    pub conclusion: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentDetail {
+    pub experiment: ExperimentRow,
+    pub hypotheses: Vec<HypothesisRow>,
+    pub evaluations: Vec<EvaluationRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunInspectReport {
     pub run: Option<StrategyRunDetail>,
     pub fills: Vec<RunFillRow>,
@@ -762,6 +832,572 @@ impl PgEventStore {
         }
 
         Ok(runs)
+    }
+
+    pub async fn insert_task_run(
+        &self,
+        task_id: &str,
+        task_kind: &str,
+        idempotency_key: Option<&str>,
+        request_payload: serde_json::Value,
+    ) -> Result<TaskRunRow> {
+        let row = sqlx::query(
+            r#"
+            insert into task_runs (
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                request_payload
+            )
+            values ($1, $2, 'queued', $3, $4)
+            returning
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            "#,
+        )
+        .bind(task_id)
+        .bind(task_kind)
+        .bind(idempotency_key)
+        .bind(Json(request_payload))
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to insert task run")?;
+
+        task_run_from_row(&row)
+    }
+
+    pub async fn find_task_run_by_idempotency_key(
+        &self,
+        task_kind: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            select
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            from task_runs
+            where task_kind = $1 and idempotency_key = $2
+            "#,
+        )
+        .bind(task_kind)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch task run by idempotency key")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn get_task_run(&self, task_id: &str) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            select
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            from task_runs
+            where task_id = $1
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch task run")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn mark_task_running(&self, task_id: &str) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            update task_runs
+            set
+                status = case
+                    when cancellation_requested then 'cancelling'
+                    else 'running'
+                end,
+                started_at = coalesce(started_at, now())
+            where task_id = $1
+            returning
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to mark task running")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn request_task_cancel(&self, task_id: &str) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            update task_runs
+            set
+                cancellation_requested = true,
+                status = case
+                    when status in ('queued', 'running', 'cancelling') then 'cancelling'
+                    else status
+                end
+            where task_id = $1
+            returning
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to request task cancellation")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn complete_task_run(
+        &self,
+        task_id: &str,
+        status: &str,
+        result_payload: serde_json::Value,
+    ) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            update task_runs
+            set
+                status = $2,
+                result_payload = $3,
+                error_payload = null,
+                finished_at = now()
+            where task_id = $1
+            returning
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            "#,
+        )
+        .bind(task_id)
+        .bind(status)
+        .bind(Json(result_payload))
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to complete task run")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn fail_task_run(
+        &self,
+        task_id: &str,
+        error_payload: serde_json::Value,
+    ) -> Result<Option<TaskRunRow>> {
+        let row = sqlx::query(
+            r#"
+            update task_runs
+            set
+                status = 'failed',
+                error_payload = $2,
+                finished_at = now()
+            where task_id = $1
+            returning
+                task_id,
+                task_kind,
+                status,
+                idempotency_key,
+                cancellation_requested,
+                request_payload,
+                result_payload,
+                error_payload,
+                submitted_at::text as submitted_at,
+                started_at::text as started_at,
+                finished_at::text as finished_at
+            "#,
+        )
+        .bind(task_id)
+        .bind(Json(error_payload))
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to mark task run failed")?;
+
+        row.as_ref().map(task_run_from_row).transpose()
+    }
+
+    pub async fn create_experiment(
+        &self,
+        experiment_id: &str,
+        title: &str,
+        target_wallet: &str,
+        thesis: Option<&str>,
+        notes: serde_json::Value,
+    ) -> Result<ExperimentRow> {
+        let row = sqlx::query(
+            r#"
+            insert into experiments (
+                experiment_id,
+                title,
+                target_wallet,
+                thesis,
+                notes
+            )
+            values ($1, $2, $3, $4, $5)
+            returning
+                experiment_id,
+                title,
+                target_wallet,
+                status,
+                thesis,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            "#,
+        )
+        .bind(experiment_id)
+        .bind(title)
+        .bind(target_wallet)
+        .bind(thesis)
+        .bind(Json(notes))
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to create experiment")?;
+
+        experiment_from_row(&row)
+    }
+
+    pub async fn get_experiment(&self, experiment_id: &str) -> Result<Option<ExperimentRow>> {
+        let row = sqlx::query(
+            r#"
+            select
+                experiment_id,
+                title,
+                target_wallet,
+                status,
+                thesis,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            from experiments
+            where experiment_id = $1
+            "#,
+        )
+        .bind(experiment_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch experiment row")?;
+
+        row.as_ref().map(experiment_from_row).transpose()
+    }
+
+    pub async fn list_experiments(&self, limit: i64) -> Result<Vec<ExperimentRow>> {
+        let rows = sqlx::query(
+            r#"
+            select
+                experiment_id,
+                title,
+                target_wallet,
+                status,
+                thesis,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            from experiments
+            order by created_at desc
+            limit $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list experiments")?;
+
+        rows.iter().map(experiment_from_row).collect()
+    }
+
+    pub async fn create_hypothesis(
+        &self,
+        hypothesis_id: &str,
+        experiment_id: &str,
+        family: &str,
+        description: &str,
+        strategy_config: serde_json::Value,
+        sample_window: serde_json::Value,
+        notes: serde_json::Value,
+    ) -> Result<HypothesisRow> {
+        let row = sqlx::query(
+            r#"
+            insert into hypotheses (
+                hypothesis_id,
+                experiment_id,
+                family,
+                description,
+                strategy_config,
+                sample_window,
+                notes
+            )
+            values ($1, $2, $3, $4, $5, $6, $7)
+            returning
+                hypothesis_id,
+                experiment_id,
+                family,
+                description,
+                status,
+                strategy_config,
+                sample_window,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            "#,
+        )
+        .bind(hypothesis_id)
+        .bind(experiment_id)
+        .bind(family)
+        .bind(description)
+        .bind(Json(strategy_config))
+        .bind(Json(sample_window))
+        .bind(Json(notes))
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to create hypothesis")?;
+
+        hypothesis_from_row(&row)
+    }
+
+    pub async fn create_evaluation(
+        &self,
+        evaluation_id: &str,
+        experiment_id: &str,
+        hypothesis_id: Option<&str>,
+        strategy_run_id: Option<i64>,
+        task_id: Option<&str>,
+        target_wallet: &str,
+        family: Option<&str>,
+        strategy_name: Option<&str>,
+        source_type: &str,
+        source_ref: &str,
+        score_overall: Option<f64>,
+        score_breakdown: serde_json::Value,
+        metrics: serde_json::Value,
+        failure_tags: &[String],
+        artifact_paths: serde_json::Value,
+        notes: serde_json::Value,
+        conclusion: Option<&str>,
+    ) -> Result<EvaluationRow> {
+        let row = sqlx::query(
+            r#"
+            insert into evaluations (
+                evaluation_id,
+                experiment_id,
+                hypothesis_id,
+                strategy_run_id,
+                task_id,
+                target_wallet,
+                family,
+                strategy_name,
+                source_type,
+                source_ref,
+                score_overall,
+                score_breakdown,
+                metrics,
+                failure_tags,
+                artifact_paths,
+                notes,
+                conclusion
+            )
+            values (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15, $16, $17
+            )
+            returning
+                evaluation_id,
+                experiment_id,
+                hypothesis_id,
+                strategy_run_id,
+                task_id,
+                target_wallet,
+                family,
+                strategy_name,
+                source_type,
+                source_ref,
+                score_overall,
+                score_breakdown,
+                metrics,
+                failure_tags,
+                artifact_paths,
+                notes,
+                conclusion,
+                created_at::text as created_at
+            "#,
+        )
+        .bind(evaluation_id)
+        .bind(experiment_id)
+        .bind(hypothesis_id)
+        .bind(strategy_run_id)
+        .bind(task_id)
+        .bind(target_wallet)
+        .bind(family)
+        .bind(strategy_name)
+        .bind(source_type)
+        .bind(source_ref)
+        .bind(score_overall)
+        .bind(Json(score_breakdown))
+        .bind(Json(metrics))
+        .bind(failure_tags)
+        .bind(Json(artifact_paths))
+        .bind(Json(notes))
+        .bind(conclusion)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to create evaluation")?;
+
+        evaluation_from_row(&row)
+    }
+
+    pub async fn inspect_experiment(
+        &self,
+        experiment_id: &str,
+    ) -> Result<Option<ExperimentDetail>> {
+        let experiment = sqlx::query(
+            r#"
+            select
+                experiment_id,
+                title,
+                target_wallet,
+                status,
+                thesis,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            from experiments
+            where experiment_id = $1
+            "#,
+        )
+        .bind(experiment_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch experiment")?;
+
+        let Some(experiment) = experiment.as_ref().map(experiment_from_row).transpose()? else {
+            return Ok(None);
+        };
+
+        let hypothesis_rows = sqlx::query(
+            r#"
+            select
+                hypothesis_id,
+                experiment_id,
+                family,
+                description,
+                status,
+                strategy_config,
+                sample_window,
+                notes,
+                created_at::text as created_at,
+                updated_at::text as updated_at
+            from hypotheses
+            where experiment_id = $1
+            order by created_at asc
+            "#,
+        )
+        .bind(experiment_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch hypotheses")?;
+
+        let evaluation_rows = sqlx::query(
+            r#"
+            select
+                evaluation_id,
+                experiment_id,
+                hypothesis_id,
+                strategy_run_id,
+                task_id,
+                target_wallet,
+                family,
+                strategy_name,
+                source_type,
+                source_ref,
+                score_overall,
+                score_breakdown,
+                metrics,
+                failure_tags,
+                artifact_paths,
+                notes,
+                conclusion,
+                created_at::text as created_at
+            from evaluations
+            where experiment_id = $1
+            order by created_at asc
+            "#,
+        )
+        .bind(experiment_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch evaluations")?;
+
+        Ok(Some(ExperimentDetail {
+            experiment,
+            hypotheses: hypothesis_rows
+                .iter()
+                .map(hypothesis_from_row)
+                .collect::<Result<Vec<_>>>()?,
+            evaluations: evaluation_rows
+                .iter()
+                .map(evaluation_from_row)
+                .collect::<Result<Vec<_>>>()?,
+        }))
     }
 
     pub async fn inspect_strategy_run(
@@ -1767,6 +2403,73 @@ fn parse_i128_str(value: &str) -> Result<i128> {
 
 fn i64_from_u64(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| anyhow!("value {value} does not fit into i64"))
+}
+
+fn task_run_from_row(row: &sqlx::postgres::PgRow) -> Result<TaskRunRow> {
+    Ok(TaskRunRow {
+        task_id: row.try_get("task_id")?,
+        task_kind: row.try_get("task_kind")?,
+        status: row.try_get("status")?,
+        idempotency_key: row.try_get("idempotency_key")?,
+        cancellation_requested: row.try_get("cancellation_requested")?,
+        request_payload: row.try_get("request_payload")?,
+        result_payload: row.try_get("result_payload")?,
+        error_payload: row.try_get("error_payload")?,
+        submitted_at: row.try_get("submitted_at")?,
+        started_at: row.try_get("started_at")?,
+        finished_at: row.try_get("finished_at")?,
+    })
+}
+
+fn experiment_from_row(row: &sqlx::postgres::PgRow) -> Result<ExperimentRow> {
+    Ok(ExperimentRow {
+        experiment_id: row.try_get("experiment_id")?,
+        title: row.try_get("title")?,
+        target_wallet: row.try_get("target_wallet")?,
+        status: row.try_get("status")?,
+        thesis: row.try_get("thesis")?,
+        notes: row.try_get("notes")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn hypothesis_from_row(row: &sqlx::postgres::PgRow) -> Result<HypothesisRow> {
+    Ok(HypothesisRow {
+        hypothesis_id: row.try_get("hypothesis_id")?,
+        experiment_id: row.try_get("experiment_id")?,
+        family: row.try_get("family")?,
+        description: row.try_get("description")?,
+        status: row.try_get("status")?,
+        strategy_config: row.try_get("strategy_config")?,
+        sample_window: row.try_get("sample_window")?,
+        notes: row.try_get("notes")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn evaluation_from_row(row: &sqlx::postgres::PgRow) -> Result<EvaluationRow> {
+    Ok(EvaluationRow {
+        evaluation_id: row.try_get("evaluation_id")?,
+        experiment_id: row.try_get("experiment_id")?,
+        hypothesis_id: row.try_get("hypothesis_id")?,
+        strategy_run_id: row.try_get("strategy_run_id")?,
+        task_id: row.try_get("task_id")?,
+        target_wallet: row.try_get("target_wallet")?,
+        family: row.try_get("family")?,
+        strategy_name: row.try_get("strategy_name")?,
+        source_type: row.try_get("source_type")?,
+        source_ref: row.try_get("source_ref")?,
+        score_overall: row.try_get("score_overall")?,
+        score_breakdown: row.try_get("score_breakdown")?,
+        metrics: row.try_get("metrics")?,
+        failure_tags: row.try_get("failure_tags")?,
+        artifact_paths: row.try_get("artifact_paths")?,
+        notes: row.try_get("notes")?,
+        conclusion: row.try_get("conclusion")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 fn i32_from_u32(value: u32) -> i32 {

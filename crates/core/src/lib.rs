@@ -23,18 +23,20 @@ pub use model::{
 };
 pub use postgres::{
     AddressExportData, AddressInspectReport, AddressMintSummary, AddressOverview, AddressRoundtrip,
-    AddressRoundtripReport, AddressTimelineRow, EventStats, MintInspectReport, MintOverview,
-    MintTradeRow, PgEventStore, PositionSnapshotInput, PositionSnapshotRow, RunFillRow,
-    RunInspectReport, StrategyRunDetail, StrategyRunPersistOptions, StrategyRunRow,
-    SweepBatchInspectReport, SweepBatchRunRow,
+    AddressRoundtripReport, AddressTimelineRow, EvaluationRow, EventStats, ExperimentDetail,
+    ExperimentRow, HypothesisRow, MintInspectReport, MintOverview, MintTradeRow, PgEventStore,
+    PositionSnapshotInput, PositionSnapshotRow, RunFillRow, RunInspectReport, StrategyRunDetail,
+    StrategyRunPersistOptions, StrategyRunRow, SweepBatchInspectReport, SweepBatchRunRow,
+    TaskRunRow,
 };
 pub use replay::load_jsonl_events;
 pub use state::{MarketState, MintState};
 pub use storage::{EventStore, RawPumpTransaction};
 pub use strategy::{AnyStrategy, NoopStrategy, StrategyKind};
 pub use strategy::{
-    EarlyFlowStrategy, EarlyFlowStrategyConfig, MomentumStrategy, MomentumStrategyConfig, Strategy,
-    StrategyMetadata,
+    BreakoutStrategy, BreakoutStrategyConfig, EarlyFlowStrategy, EarlyFlowStrategyConfig,
+    LiquidityFollowStrategy, LiquidityFollowStrategyConfig, MomentumStrategy,
+    MomentumStrategyConfig, Strategy, StrategyMetadata,
 };
 // strategy-scaffold: lib-pub-use
 pub use yellowstone_grpc_proto::prelude::CommitmentLevel;
