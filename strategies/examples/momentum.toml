@@ -1,0 +1,13 @@
+[strategy]
+strategy = "momentum"
+starting_sol = 10.0
+buy_sol = 0.2
+max_age_secs = 45
+min_buy_count = 3
+min_unique_buyers = 3
+min_net_buy_sol = 0.3
+take_profit_bps = 2500
+stop_loss_bps = 1200
+max_hold_secs = 90
+trading_fee_bps = 100
+slippage_bps = 50
